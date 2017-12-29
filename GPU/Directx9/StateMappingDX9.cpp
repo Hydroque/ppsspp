@@ -103,11 +103,6 @@ void DrawEngineDX9::ApplyDrawState(int prim) {
 	if (gstate_c.IsDirty(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS) && !gstate.isModeClear() && gstate.isTextureMapEnabled()) {
 		textureCache_->SetTexture();
 		gstate_c.Clean(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS);
-		if (gstate_c.needShaderTexClamp) {
-			// We will rarely need to set this, so let's do it every time on use rather than in runloop.
-			// Most of the time non-framebuffer textures will be used which can be clamped themselves.
-			gstate_c.Dirty(DIRTY_TEXCLAMP);
-		}
 	}
 
 	// Start profiling here to skip SetTexture which is already accounted for
@@ -115,7 +110,8 @@ void DrawEngineDX9::ApplyDrawState(int prim) {
 
 	bool useBufferedRendering = g_Config.iRenderingMode != FB_NON_BUFFERED_MODE;
 
-	{
+	if (gstate_c.IsDirty(DIRTY_BLEND_STATE)) {
+		gstate_c.Clean(DIRTY_BLEND_STATE);
 		// Unfortunately, this isn't implemented yet.
 		gstate_c.SetAllowShaderBlend(false);
 		if (gstate.isModeClear()) {
@@ -197,7 +193,8 @@ void DrawEngineDX9::ApplyDrawState(int prim) {
 
 	bool enableStencilTest = !g_Config.bDisableStencilTest;
 
-	{
+	if (gstate_c.IsDirty(DIRTY_RASTER_STATE)) {
+		gstate_c.Clean(DIRTY_RASTER_STATE);
 		// Set Dither
 		if (gstate.isDitherEnabled()) {
 			dxstate.dither.enable();
@@ -214,7 +211,8 @@ void DrawEngineDX9::ApplyDrawState(int prim) {
 		}
 	}
 
-	{
+	if (gstate_c.IsDirty(DIRTY_DEPTHSTENCIL_STATE)) {
+		gstate_c.Clean(DIRTY_DEPTHSTENCIL_STATE);
 		// Set Stencil/Depth
 		if (gstate.isModeClear()) {
 			// Depth Test
@@ -264,7 +262,8 @@ void DrawEngineDX9::ApplyDrawState(int prim) {
 		}
 	}
 
-	{
+	if (gstate_c.IsDirty(DIRTY_VIEWPORTSCISSOR_STATE)) {
+		gstate_c.Clean(DIRTY_VIEWPORTSCISSOR_STATE);
 		ViewportAndScissor vpAndScissor;
 		ConvertViewportAndScissor(useBufferedRendering,
 			framebufferManager_->GetRenderWidth(), framebufferManager_->GetRenderHeight(),

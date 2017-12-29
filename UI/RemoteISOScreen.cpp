@@ -17,6 +17,8 @@
 
 #include <algorithm>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 
 #include "base/timeutil.h"
 #include "ext/vjson/json.h"
@@ -184,6 +186,20 @@ static void ExecuteServer() {
 	http->Stop();
 
 	UpdateStatus(ServerStatus::STOPPED);
+}
+
+bool StartRemoteISOSharing() {
+	std::lock_guard<std::mutex> guard(serverStatusLock);
+
+	if (serverStatus != ServerStatus::STOPPED) {
+		return false;
+	}
+
+	serverStatus = ServerStatus::STARTING;
+	serverThread = new std::thread(&ExecuteServer);
+	serverThread->detach();
+
+	return true;
 }
 
 static bool FindServer(std::string &resultHost, int &resultPort) {
@@ -371,7 +387,7 @@ void RemoteISOScreen::update() {
 
 void RemoteISOScreen::CreateViews() {
 	I18NCategory *di = GetI18NCategory("Dialog");
-	I18NCategory *sy = GetI18NCategory("System");
+	I18NCategory *ri = GetI18NCategory("RemoteISO");
 
 	Margins actionMenuMargins(0, 20, 15, 0);
 	Margins contentMargins(0, 20, 5, 5);
@@ -380,24 +396,24 @@ void RemoteISOScreen::CreateViews() {
 	ViewGroup *rightColumn = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(300, FILL_PARENT, actionMenuMargins));
 	LinearLayout *rightColumnItems = new LinearLayout(ORIENT_VERTICAL);
 
-	leftColumnItems->Add(new TextView(sy->T("RemoteISODesc", "Games in your recent list will be shared"), new LinearLayoutParams(Margins(12, 5, 0, 5))));
-	leftColumnItems->Add(new TextView(sy->T("RemoteISOWifi", "Note: Connect both devices to the same wifi"), new LinearLayoutParams(Margins(12, 5, 0, 5))));
+	leftColumnItems->Add(new TextView(ri->T("RemoteISODesc", "Games in your recent list will be shared"), new LinearLayoutParams(Margins(12, 5, 0, 5))));
+	leftColumnItems->Add(new TextView(ri->T("RemoteISOWifi", "Note: Connect both devices to the same wifi"), new LinearLayoutParams(Margins(12, 5, 0, 5))));
 
 	rightColumnItems->SetSpacing(0.0f);
-	Choice *browseChoice = new Choice(sy->T("Browse Games"));
+	Choice *browseChoice = new Choice(ri->T("Browse Games"));
 	rightColumnItems->Add(browseChoice)->OnClick.Handle(this, &RemoteISOScreen::HandleBrowse);
 	ServerStatus status = RetrieveStatus();
 	if (status == ServerStatus::STOPPING) {
-		rightColumnItems->Add(new Choice(sy->T("Stopping..")))->SetDisabledPtr(&serverStopping_);
+		rightColumnItems->Add(new Choice(ri->T("Stopping..")))->SetDisabledPtr(&serverStopping_);
 		browseChoice->SetEnabled(false);
 	} else if (status != ServerStatus::STOPPED) {
-		rightColumnItems->Add(new Choice(sy->T("Stop Sharing")))->OnClick.Handle(this, &RemoteISOScreen::HandleStopServer);
+		rightColumnItems->Add(new Choice(ri->T("Stop Sharing")))->OnClick.Handle(this, &RemoteISOScreen::HandleStopServer);
 		browseChoice->SetEnabled(false);
 	} else {
-		rightColumnItems->Add(new Choice(sy->T("Share Games (Server)")))->OnClick.Handle(this, &RemoteISOScreen::HandleStartServer);
+		rightColumnItems->Add(new Choice(ri->T("Share Games (Server)")))->OnClick.Handle(this, &RemoteISOScreen::HandleStartServer);
 		browseChoice->SetEnabled(true);
 	}
-	Choice *settingsChoice = new Choice(sy->T("Settings"));
+	Choice *settingsChoice = new Choice(ri->T("Settings"));
 	rightColumnItems->Add(settingsChoice)->OnClick.Handle(this, &RemoteISOScreen::HandleSettings);
 
 	LinearLayout *beforeBack = new LinearLayout(ORIENT_HORIZONTAL, new AnchorLayoutParams(FILL_PARENT, FILL_PARENT));
@@ -412,15 +428,9 @@ void RemoteISOScreen::CreateViews() {
 }
 
 UI::EventReturn RemoteISOScreen::HandleStartServer(UI::EventParams &e) {
-	std::lock_guard<std::mutex> guard(serverStatusLock);
-
-	if (serverStatus != ServerStatus::STOPPED) {
+	if (!StartRemoteISOSharing()) {
 		return EVENT_SKIPPED;
 	}
-
-	serverStatus = ServerStatus::STARTING;
-	serverThread = new std::thread(&ExecuteServer);
-	serverThread->detach();
 
 	return EVENT_DONE;
 }
@@ -474,7 +484,8 @@ RemoteISOConnectScreen::~RemoteISOConnectScreen() {
 }
 
 void RemoteISOConnectScreen::CreateViews() {
-	I18NCategory *sy = GetI18NCategory("System");
+	I18NCategory *di = GetI18NCategory("Dialog");
+	I18NCategory *ri = GetI18NCategory("RemoteISO");
 
 	Margins actionMenuMargins(0, 20, 15, 0);
 	Margins contentMargins(0, 20, 5, 5);
@@ -483,10 +494,10 @@ void RemoteISOConnectScreen::CreateViews() {
 	ViewGroup *rightColumn = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(300, FILL_PARENT, actionMenuMargins));
 	LinearLayout *rightColumnItems = new LinearLayout(ORIENT_VERTICAL);
 
-	statusView_ = leftColumnItems->Add(new TextView(sy->T("RemoteISOScanning", "Scanning... click Share Games on your desktop"), new LinearLayoutParams(Margins(12, 5, 0, 5))));
+	statusView_ = leftColumnItems->Add(new TextView(ri->T("RemoteISOScanning", "Scanning... click Share Games on your desktop"), new LinearLayoutParams(Margins(12, 5, 0, 5))));
 
 	rightColumnItems->SetSpacing(0.0f);
-	rightColumnItems->Add(new Choice(sy->T("Cancel"), "", false, new AnchorLayoutParams(150, WRAP_CONTENT, 10, NONE, NONE, 10)))->OnClick.Handle<UIScreen>(this, &UIScreen::OnBack);
+	rightColumnItems->Add(new Choice(di->T("Cancel"), "", false, new AnchorLayoutParams(150, WRAP_CONTENT, 10, NONE, NONE, 10)))->OnClick.Handle<UIScreen>(this, &UIScreen::OnBack);
 
 	root_ = new LinearLayout(ORIENT_HORIZONTAL, new LinearLayoutParams(FILL_PARENT, FILL_PARENT, 1.0f));
 	root_->Add(leftColumn);
@@ -497,7 +508,7 @@ void RemoteISOConnectScreen::CreateViews() {
 }
 
 void RemoteISOConnectScreen::update() {
-	I18NCategory *sy = GetI18NCategory("System");
+	I18NCategory *ri = GetI18NCategory("RemoteISO");
 
 	UIScreenWithBackground::update();
 
@@ -508,7 +519,7 @@ void RemoteISOConnectScreen::update() {
 		break;
 
 	case ScanStatus::FOUND:
-		statusView_->SetText(sy->T("RemoteISOLoading", "Connected - loading game list"));
+		statusView_->SetText(ri->T("RemoteISOLoading", "Connected - loading game list"));
 		status_ = ScanStatus::LOADING;
 
 		// Let's reuse scanThread_.
@@ -598,8 +609,8 @@ RemoteISOBrowseScreen::RemoteISOBrowseScreen(const std::vector<std::string> &gam
 void RemoteISOBrowseScreen::CreateViews() {
 	bool vertical = UseVerticalLayout();
 
-	I18NCategory *mm = GetI18NCategory("MainMenu");
 	I18NCategory *di = GetI18NCategory("Dialog");
+	I18NCategory *ri = GetI18NCategory("RemoteISO");
 
 	Margins actionMenuMargins(0, 10, 10, 0);
 
@@ -618,7 +629,7 @@ void RemoteISOBrowseScreen::CreateViews() {
 	scrollRecentGames->Add(tabRemoteGames);
 	gameBrowsers_.push_back(tabRemoteGames);
 
-	leftColumn->AddTab(mm->T("Remote Server"), scrollRecentGames);
+	leftColumn->AddTab(ri->T("Remote Server"), scrollRecentGames);
 	tabRemoteGames->OnChoice.Handle<MainScreen>(this, &MainScreen::OnGameSelectedInstant);
 	tabRemoteGames->OnHoldChoice.Handle<MainScreen>(this, &MainScreen::OnGameSelected);
 	tabRemoteGames->OnHighlight.Handle<MainScreen>(this, &MainScreen::OnGameHighlight);
@@ -650,7 +661,7 @@ void RemoteISOBrowseScreen::CreateViews() {
 }
 
 RemoteISOSettingsScreen::RemoteISOSettingsScreen() {
-	serverRunning_ = RetrieveStatus() != ServerStatus::STOPPED;;
+	serverRunning_ = RetrieveStatus() != ServerStatus::STOPPED;
 }
 
 void RemoteISOSettingsScreen::update() {
@@ -664,9 +675,7 @@ void RemoteISOSettingsScreen::update() {
 }
 
 void RemoteISOSettingsScreen::CreateViews() {
-	I18NCategory *di = GetI18NCategory("Dialog");
-	I18NCategory *n = GetI18NCategory("Networking");
-	I18NCategory *ms = GetI18NCategory("MainSettings");
+	I18NCategory *ri = GetI18NCategory("RemoteISO");
 	
 	ViewGroup *remoteisoSettingsScroll = new ScrollView(ORIENT_VERTICAL, new LayoutParams(FILL_PARENT, FILL_PARENT));
 	remoteisoSettingsScroll->SetTag("RemoteISOSettings");
@@ -674,17 +683,30 @@ void RemoteISOSettingsScreen::CreateViews() {
 	remoteisoSettings->SetSpacing(0);
 	remoteisoSettingsScroll->Add(remoteisoSettings);
 
-	remoteisoSettings->Add(new ItemHeader(ms->T("Remote Disc Streaming")));
-	remoteisoSettings->Add(new CheckBox(&g_Config.bRemoteISOManual, n->T("Manual Mode Client", "Manual Mode Client")));
-	PopupTextInputChoice *remoteServer = remoteisoSettings->Add(new PopupTextInputChoice(&g_Config.sLastRemoteISOServer, n->T("Remote Server"), "", 255, screenManager()));
+	remoteisoSettings->Add(new ItemHeader(ri->T("Remote disc streaming")));
+	remoteisoSettings->Add(new CheckBox(&g_Config.bRemoteShareOnStartup, ri->T("Share on PPSSPP startup")));
+	remoteisoSettings->Add(new CheckBox(&g_Config.bRemoteISOManual, ri->T("Manual Mode Client", "Manually configure client")));
+#if !defined(MOBILE_DEVICE)
+	PopupTextInputChoice *remoteServer = remoteisoSettings->Add(new PopupTextInputChoice(&g_Config.sLastRemoteISOServer, ri->T("Remote Server"), "", 255, screenManager()));
+#else
+	ChoiceWithValueDisplay *remoteServer = new ChoiceWithValueDisplay(&g_Config.sLastRemoteISOServer, ri->T("Remote Server"), nullptr);
+	remoteisoSettings->Add(remoteServer);
+	remoteServer->OnClick.Handle(this, &RemoteISOSettingsScreen::OnClickRemoteServer);
+#endif
 	remoteServer->SetEnabledPtr(&g_Config.bRemoteISOManual);
-	PopupSliderChoice *remotePort = remoteisoSettings->Add(new PopupSliderChoice(&g_Config.iLastRemoteISOPort, 0, 65535, n->T("Remote Port", "Remote Port"), 100, screenManager()));
+	PopupSliderChoice *remotePort = remoteisoSettings->Add(new PopupSliderChoice(&g_Config.iLastRemoteISOPort, 0, 65535, ri->T("Remote Port", "Remote Port"), 100, screenManager()));
 	remotePort->SetEnabledPtr(&g_Config.bRemoteISOManual);
-	PopupTextInputChoice *remoteSubdir = remoteisoSettings->Add(new PopupTextInputChoice(&g_Config.sRemoteISOSubdir, n->T("Remote Subdirectory"), "", 255, screenManager()));
-	remoteSubdir->SetEnabledPtr(&g_Config.bRemoteISOManual);
+#if !defined(MOBILE_DEVICE)
+	PopupTextInputChoice *remoteSubdir = remoteisoSettings->Add(new PopupTextInputChoice(&g_Config.sRemoteISOSubdir, ri->T("Remote Subdirectory"), "", 255, screenManager()));
 	remoteSubdir->OnChange.Handle(this, &RemoteISOSettingsScreen::OnChangeRemoteISOSubdir);
+#else
+	ChoiceWithValueDisplay *remoteSubdir = remoteisoSettings->Add(
+			new ChoiceWithValueDisplay(&g_Config.sRemoteISOSubdir, ri->T("Remote Subdirectory"), nullptr));
+	remoteSubdir->OnClick.Handle(this, &RemoteISOSettingsScreen::OnClickRemoteISOSubdir);
+#endif
+	remoteSubdir->SetEnabledPtr(&g_Config.bRemoteISOManual);
 
-	PopupSliderChoice *portChoice = new PopupSliderChoice(&g_Config.iRemoteISOPort, 0, 65535, n->T("Local Server Port", "Local Server Port"), 100, screenManager());
+	PopupSliderChoice *portChoice = new PopupSliderChoice(&g_Config.iRemoteISOPort, 0, 65535, ri->T("Local Server Port", "Local Server Port"), 100, screenManager());
 	remoteisoSettings->Add(portChoice);
 	portChoice->SetDisabledPtr(&serverRunning_);
 	remoteisoSettings->Add(new Spacer(25.0));
@@ -692,6 +714,16 @@ void RemoteISOSettingsScreen::CreateViews() {
 	root_ = new AnchorLayout(new LayoutParams(FILL_PARENT, FILL_PARENT));
 	root_->Add(remoteisoSettingsScroll);
 	AddStandardBack(root_);
+}
+
+UI::EventReturn RemoteISOSettingsScreen::OnClickRemoteServer(UI::EventParams &e) {
+	System_SendMessage("inputbox", ("remoteiso_server:" + g_Config.sLastRemoteISOServer).c_str());
+	return UI::EVENT_DONE;
+}
+
+UI::EventReturn RemoteISOSettingsScreen::OnClickRemoteISOSubdir(UI::EventParams &e) {
+	System_SendMessage("inputbox", ("remoteiso_subdir:" + g_Config.sRemoteISOSubdir).c_str());
+	return UI::EVENT_DONE;
 }
 
 UI::EventReturn RemoteISOSettingsScreen::OnChangeRemoteISOSubdir(UI::EventParams &e) {

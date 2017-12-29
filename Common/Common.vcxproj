@@ -22,7 +22,8 @@
     <ProjectGuid>{3FCDBAE2-5103-4350-9A8E-848CE9C73195}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>Common</RootNamespace>
-    <WindowsTargetPlatformVersion></WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>
+    </WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -226,6 +227,7 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
     </ClInclude>
     <ClInclude Include="GraphicsContext.h" />
+    <ClInclude Include="Hashmaps.h" />
     <ClInclude Include="KeyMap.h" />
     <ClInclude Include="Log.h" />
     <ClInclude Include="LogManager.h" />
@@ -244,6 +246,7 @@
     <ClInclude Include="Timer.h" />
     <ClInclude Include="Vulkan\SPIRVDisasm.h" />
     <ClInclude Include="Vulkan\VulkanContext.h" />
+    <ClInclude Include="Vulkan\VulkanDebug.h" />
     <ClInclude Include="Vulkan\VulkanImage.h" />
     <ClInclude Include="Vulkan\VulkanLoader.h" />
     <ClInclude Include="Vulkan\VulkanMemory.h" />
@@ -315,6 +318,7 @@
     <ClCompile Include="Timer.cpp" />
     <ClCompile Include="Vulkan\SPIRVDisasm.cpp" />
     <ClCompile Include="Vulkan\VulkanContext.cpp" />
+    <ClCompile Include="Vulkan\VulkanDebug.cpp" />
     <ClCompile Include="Vulkan\VulkanImage.cpp" />
     <ClCompile Include="Vulkan\VulkanLoader.cpp" />
     <ClCompile Include="Vulkan\VulkanMemory.cpp" />

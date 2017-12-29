@@ -132,10 +132,16 @@ class FramebufferManagerD3D11;
 class ShaderManagerD3D11;
 
 void DrawEngineD3D11::ApplyDrawState(int prim) {
-	bool useBufferedRendering = g_Config.iRenderingMode != FB_NON_BUFFERED_MODE;
+	dynState_.topology = primToD3D11[prim];
 
+	if (!gstate_c.IsDirty(DIRTY_BLEND_STATE | DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_RASTER_STATE | DIRTY_DEPTHSTENCIL_STATE)) {
+		// nothing to do
+		return;
+	}
+
+	bool useBufferedRendering = g_Config.iRenderingMode != FB_NON_BUFFERED_MODE;
 	// Blend
-	{
+	if (gstate_c.IsDirty(DIRTY_BLEND_STATE)) {
 		gstate_c.SetAllowShaderBlend(!g_Config.bDisableSlowFramebufEffects);
 		if (gstate.isModeClear()) {
 			keys_.blend.value = 0;  // full wipe
@@ -230,9 +236,8 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 		}
 
 		if (!device1_) {
-			ID3D11BlendState *bs = nullptr;
-			auto blendIter = blendCache_.find(keys_.blend.value);
-			if (blendIter == blendCache_.end()) {
+			ID3D11BlendState *bs = blendCache_.Get(keys_.blend.value);
+			if (bs == nullptr) {
 				D3D11_BLEND_DESC desc{};
 				D3D11_RENDER_TARGET_BLEND_DESC &rt = desc.RenderTarget[0];
 				rt.BlendEnable = keys_.blend.blendEnable;
@@ -244,15 +249,12 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 				rt.DestBlendAlpha = (D3D11_BLEND)keys_.blend.destAlpha;
 				rt.RenderTargetWriteMask = keys_.blend.colorWriteMask;
 				ASSERT_SUCCESS(device_->CreateBlendState(&desc, &bs));
-				blendCache_.insert(std::pair<uint64_t, ID3D11BlendState *>(keys_.blend.value, bs));
-			} else {
-				bs = blendIter->second;
+				blendCache_.Insert(keys_.blend.value, bs);
 			}
 			blendState_ = bs;
 		} else {
-			ID3D11BlendState1 *bs1 = nullptr;
-			auto blendIter = blendCache1_.find(keys_.blend.value);
-			if (blendIter == blendCache1_.end()) {
+			ID3D11BlendState1 *bs1 = blendCache1_.Get(keys_.blend.value);
+			if (bs1 == nullptr) {
 				D3D11_BLEND_DESC1 desc1{};
 				D3D11_RENDER_TARGET_BLEND_DESC1 &rt = desc1.RenderTarget[0];
 				rt.BlendEnable = keys_.blend.blendEnable;
@@ -266,15 +268,13 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 				rt.LogicOpEnable = keys_.blend.logicOpEnable;
 				rt.LogicOp = (D3D11_LOGIC_OP)keys_.blend.logicOp;
 				ASSERT_SUCCESS(device1_->CreateBlendState1(&desc1, &bs1));
-				blendCache1_.insert(std::pair<uint64_t, ID3D11BlendState1 *>(keys_.blend.value, bs1));
-			} else {
-				bs1 = blendIter->second;
+				blendCache1_.Insert(keys_.blend.value, bs1);
 			}
 			blendState1_ = bs1;
 		}
 	}
 
-	{
+	if (gstate_c.IsDirty(DIRTY_RASTER_STATE)) {
 		keys_.raster.value = 0;
 		if (gstate.isModeClear()) {
 			keys_.raster.cullMode = D3D11_CULL_NONE;
@@ -283,9 +283,8 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 			bool wantCull = !gstate.isModeThrough() && prim != GE_PRIM_RECTANGLES && gstate.isCullEnabled();
 			keys_.raster.cullMode = wantCull ? (gstate.getCullMode() ? D3D11_CULL_FRONT : D3D11_CULL_BACK) : D3D11_CULL_NONE;
 		}
-		ID3D11RasterizerState *rs = nullptr;
-		auto rasterIter = rasterCache_.find(keys_.raster.value);
-		if (rasterIter == rasterCache_.end()) {
+		ID3D11RasterizerState *rs = rasterCache_.Get(keys_.raster.value);
+		if (rs == nullptr) {
 			D3D11_RASTERIZER_DESC desc{};
 			desc.CullMode = (D3D11_CULL_MODE)(keys_.raster.cullMode);
 			desc.FillMode = D3D11_FILL_SOLID;
@@ -293,15 +292,12 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 			desc.FrontCounterClockwise = TRUE;
 			desc.DepthClipEnable = TRUE;
 			ASSERT_SUCCESS(device_->CreateRasterizerState(&desc, &rs));
-			rasterCache_.insert(std::pair<uint32_t, ID3D11RasterizerState *>(keys_.raster.value, rs));
-		} else {
-			rs = rasterIter->second;
+			rasterCache_.Insert(keys_.raster.value, rs);
 		}
 		rasterState_ = rs;
 	}
 
-	{
-		// Set ColorMask/Stencil/Depth
+	if (gstate_c.IsDirty(DIRTY_DEPTHSTENCIL_STATE)) {
 		if (gstate.isModeClear()) {
 			keys_.depthStencil.value = 0;
 			keys_.depthStencil.depthTestEnable = true;
@@ -365,9 +361,8 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 				dynState_.useStencil = false;
 			}
 		}
-		ID3D11DepthStencilState *ds = nullptr;
-		auto depthIter = depthStencilCache_.find(keys_.depthStencil.value);
-		if (depthIter == depthStencilCache_.end()) {
+		ID3D11DepthStencilState *ds = depthStencilCache_.Get(keys_.depthStencil.value);
+		if (ds == nullptr) {
 			D3D11_DEPTH_STENCIL_DESC desc{};
 			desc.DepthEnable = keys_.depthStencil.depthTestEnable;
 			desc.DepthWriteMask = keys_.depthStencil.depthWriteEnable ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
@@ -381,14 +376,12 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 			desc.FrontFace.StencilFunc = (D3D11_COMPARISON_FUNC)keys_.depthStencil.stencilCompareFunc;
 			desc.BackFace = desc.FrontFace;
 			ASSERT_SUCCESS(device_->CreateDepthStencilState(&desc, &ds));
-			depthStencilCache_.insert(std::pair<uint64_t, ID3D11DepthStencilState *>(keys_.depthStencil.value, ds));
-		} else {
-			ds = depthIter->second;
+			depthStencilCache_.Insert(keys_.depthStencil.value, ds);
 		}
 		depthStencilState_ = ds;
 	}
 
-	{
+	if (gstate_c.IsDirty(DIRTY_VIEWPORTSCISSOR_STATE)) {
 		ViewportAndScissor vpAndScissor;
 		ConvertViewportAndScissor(useBufferedRendering,
 			framebufferManager_->GetRenderWidth(), framebufferManager_->GetRenderHeight(),
@@ -411,6 +404,7 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 		vp.Height = vpAndScissor.viewportH;
 		vp.MinDepth = depthMin;
 		vp.MaxDepth = depthMax;
+
 		if (vpAndScissor.dirtyProj) {
 			gstate_c.Dirty(DIRTY_PROJMATRIX);
 		}
@@ -429,16 +423,9 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 		}
 	}
 
-	dynState_.topology = primToD3D11[prim];
-
 	if (gstate_c.IsDirty(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS) && !gstate.isModeClear() && gstate.isTextureMapEnabled()) {
 		textureCache_->SetTexture();
 		gstate_c.Clean(DIRTY_TEXTURE_IMAGE | DIRTY_TEXTURE_PARAMS);
-		if (gstate_c.needShaderTexClamp) {
-			// We will rarely need to set this, so let's do it every time on use rather than in runloop.
-			// Most of the time non-framebuffer textures will be used which can be clamped themselves.
-			gstate_c.Dirty(DIRTY_TEXCLAMP);
-		}
 	}
 }
 
@@ -453,18 +440,26 @@ void DrawEngineD3D11::ApplyDrawStateLate(bool applyStencilRef, uint8_t stencilRe
 		textureCache_->ApplyTexture();
 	}
 
-	// Need to do this AFTER ApplyTexture because the process of depallettization can ruin the blend state.
-	float blendColor[4];
-	Uint8x4ToFloat4(blendColor, dynState_.blendColor);
-
 	// we go through Draw here because it automatically handles screen rotation, as needed in UWP on mobiles.
-	draw_->SetViewports(1, &dynState_.viewport);
-	draw_->SetScissorRect(dynState_.scissor.left, dynState_.scissor.top, dynState_.scissor.right - dynState_.scissor.left, dynState_.scissor.bottom - dynState_.scissor.top);
-	context_->RSSetState(rasterState_);
-	if (device1_) {
-		context1_->OMSetBlendState(blendState1_, blendColor, 0xFFFFFFFF);
-	} else {
-		context_->OMSetBlendState(blendState_, blendColor, 0xFFFFFFFF);
+	if (gstate_c.IsDirty(DIRTY_VIEWPORTSCISSOR_STATE)) {
+		draw_->SetViewports(1, &dynState_.viewport);
+		draw_->SetScissorRect(dynState_.scissor.left, dynState_.scissor.top, dynState_.scissor.right - dynState_.scissor.left, dynState_.scissor.bottom - dynState_.scissor.top);
 	}
-	context_->OMSetDepthStencilState(depthStencilState_, applyStencilRef ? stencilRef : dynState_.stencilRef);
+	if (gstate_c.IsDirty(DIRTY_RASTER_STATE)) {
+		context_->RSSetState(rasterState_);
+	}
+	if (gstate_c.IsDirty(DIRTY_BLEND_STATE)) {
+		// Need to do this AFTER ApplyTexture because the process of depallettization can ruin the blend state.
+		float blendColor[4];
+		Uint8x4ToFloat4(blendColor, dynState_.blendColor);
+		if (device1_) {
+			context1_->OMSetBlendState(blendState1_, blendColor, 0xFFFFFFFF);
+		} else {
+			context_->OMSetBlendState(blendState_, blendColor, 0xFFFFFFFF);
+		}
+	}
+	if (gstate_c.IsDirty(DIRTY_DEPTHSTENCIL_STATE) || applyStencilRef) {
+		context_->OMSetDepthStencilState(depthStencilState_, applyStencilRef ? stencilRef : dynState_.stencilRef);
+	}
+	gstate_c.Clean(DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_DEPTHSTENCIL_STATE | DIRTY_RASTER_STATE | DIRTY_BLEND_STATE);
 }

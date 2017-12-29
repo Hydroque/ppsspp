@@ -17,10 +17,9 @@
 
 #pragma once
 
-#include <unordered_map>
-
 #include <d3d9.h>
 
+#include "Common/Hashmaps.h"
 #include "GPU/GPUState.h"
 #include "GPU/Common/GPUDebugInterface.h"
 #include "GPU/Common/IndexGenerator.h"
@@ -71,7 +70,7 @@ public:
 	}
 	~VertexArrayInfoDX9();
 
-	enum Status {
+	enum Status : uint8_t {
 		VAI_NEW,
 		VAI_HASHING,
 		VAI_RELIABLE,  // cache, don't hash
@@ -81,8 +80,6 @@ public:
 	ReliableHashType hash;
 	u32 minihash;
 
-	Status status;
-
 	LPDIRECT3DVERTEXBUFFER9 vbo;
 	LPDIRECT3DINDEXBUFFER9 ebo;
 
@@ -90,6 +87,7 @@ public:
 	u16 numVerts;
 	u16 maxIndex;
 	s8 prim;
+	Status status;
 
 	// ID information
 	int numDraws;
@@ -132,10 +130,8 @@ public:
 	void FinishDeferred() {
 		if (!numDrawCalls)
 			return;
-		DecodeVerts();
+		DecodeVerts(decoded);
 	}
-
-	bool IsCodePtrVertexDecoder(const u8 *ptr) const;
 
 	void DispatchFlush() override { Flush(); }
 	void DispatchSubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertType, int *bytesRead) override {
@@ -143,7 +139,6 @@ public:
 	}
 
 private:
-	void DecodeVerts();
 	void DoFlush();
 
 	void ApplyDrawState(int prim);
@@ -156,8 +151,8 @@ private:
 
 	LPDIRECT3DDEVICE9 device_ = nullptr;
 
-	std::unordered_map<u32, VertexArrayInfoDX9 *> vai_;
-	std::unordered_map<u32, IDirect3DVertexDeclaration9 *> vertexDeclMap_;
+	PrehashMap<VertexArrayInfoDX9 *, nullptr> vai_;
+	DenseHashMap<u32, IDirect3DVertexDeclaration9 *, nullptr> vertexDeclMap_;
 
 	// SimpleVertex
 	IDirect3DVertexDeclaration9* transformedVertexDecl_ = nullptr;

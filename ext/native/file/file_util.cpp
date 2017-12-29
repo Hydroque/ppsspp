@@ -7,8 +7,6 @@
 #ifndef strcasecmp
 #define strcasecmp _stricmp
 #endif
-#define fseeko _fseeki64
-#define ftello _ftelli64
 #else
 #include <dirent.h>
 #include <unistd.h>
@@ -85,13 +83,23 @@ uint64_t GetSize(FILE *f)
 	}
 	return size;
 #else
+#ifdef _WIN32
+	uint64_t pos = _ftelli64(f);
+#else
 	uint64_t pos = ftello(f);
+#endif
 	if (fseek(f, 0, SEEK_END) != 0) {
 		return 0;
 	}
+#ifdef _WIN32
+	uint64_t size = _ftelli64(f);
+	// Reset the seek position to where it was when we started.
+	if (size != pos && _fseeki64(f, pos, SEEK_SET) != 0) {
+#else
 	uint64_t size = ftello(f);
 	// Reset the seek position to where it was when we started.
 	if (size != pos && fseeko(f, pos, SEEK_SET) != 0) {
+#endif
 		// Should error here.
 		return 0;
 	}
@@ -156,7 +164,7 @@ bool getFileInfo(const char *path, FileInfo *fileInfo) {
 
 	std::string copy(path);
 
-#ifdef __ANDROID__ && __ANDROID_API__ < 21
+#if (defined __ANDROID__) && (__ANDROID_API__ < 21)
 	struct stat file_info;
 	int result = stat(copy.c_str(), &file_info);
 #else

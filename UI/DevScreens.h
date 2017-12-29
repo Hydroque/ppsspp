@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "file/file_util.h"
+#include "i18n/i18n.h"
 #include "ui/ui_screen.h"
 
 #include "UI/MiscScreens.h"
@@ -30,7 +31,7 @@
 
 class DevMenu : public PopupScreen {
 public:
-	DevMenu() : PopupScreen("Dev Tools") {}
+	DevMenu(I18NCategory *i18n) : PopupScreen(i18n->T("Dev Tools")) {}
 
 	void CreatePopupContents(UI::ViewGroup *parent) override;
 	void dialogFinished(const Screen *dialog, DialogResult result) override;
@@ -86,7 +87,7 @@ private:
 class SystemInfoScreen : public UIDialogScreenWithBackground {
 public:
 	SystemInfoScreen() {}
-	virtual void CreateViews();
+	void CreateViews() override;
 };
 
 class AddressPromptScreen : public PopupScreen {
@@ -151,7 +152,7 @@ public:
 	void CreateViews() override;
 
 private:
-	void ListShaders(DebugShaderType shaderType, UI::LinearLayout *view);
+	int ListShaders(DebugShaderType shaderType, UI::LinearLayout *view);
 
 	UI::EventReturn OnShaderClick(UI::EventParams &e);
 

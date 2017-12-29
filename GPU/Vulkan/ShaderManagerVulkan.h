@@ -17,10 +17,9 @@
 
 #pragma once
 
-#include <map>
-
 #include "base/basictypes.h"
-#include "Globals.h"
+#include "Common/Hashmaps.h"
+#include "Common/Vulkan/VulkanMemory.h"
 #include "GPU/Common/ShaderCommon.h"
 #include "GPU/Common/ShaderId.h"
 #include "GPU/Vulkan/VertexShaderGeneratorVulkan.h"
@@ -34,7 +33,7 @@ class VulkanPushBuffer;
 
 class VulkanFragmentShader {
 public:
-	VulkanFragmentShader(VulkanContext *vulkan, ShaderID id, const char *code, bool useHWTransform);
+	VulkanFragmentShader(VulkanContext *vulkan, FShaderID id, const char *code, bool useHWTransform);
 	~VulkanFragmentShader();
 
 	const std::string &source() const { return source_; }
@@ -52,12 +51,12 @@ protected:
 	std::string source_;
 	bool failed_;
 	bool useHWTransform_;
-	ShaderID id_;
+	FShaderID id_;
 };
 
 class VulkanVertexShader {
 public:
-	VulkanVertexShader(VulkanContext *vulkan, ShaderID id, const char *code, int vertType, bool useHWTransform, bool usesLighting);
+	VulkanVertexShader(VulkanContext *vulkan, VShaderID id, const char *code, int vertType, bool useHWTransform, bool usesLighting);
 	~VulkanVertexShader();
 
 	const std::string &source() const { return source_; }
@@ -82,7 +81,7 @@ protected:
 	bool failed_;
 	bool useHWTransform_;
 	bool usesLighting_;
-	ShaderID id_;
+	VShaderID id_;
 };
 
 class VulkanPushBuffer;
@@ -113,19 +112,26 @@ public:
 	bool IsLightDirty() { return true; }
 	bool IsBoneDirty() { return true; }
 
-	uint32_t PushBaseBuffer(VulkanPushBuffer *dest, VkBuffer *buf);
-	uint32_t PushLightBuffer(VulkanPushBuffer *dest, VkBuffer *buf);
-	uint32_t PushBoneBuffer(VulkanPushBuffer *dest, VkBuffer *buf);
+	uint32_t PushBaseBuffer(VulkanPushBuffer *dest, VkBuffer *buf) {
+		return dest->PushAligned(&ub_base, sizeof(ub_base), uboAlignment_, buf);
+	}
+	uint32_t PushLightBuffer(VulkanPushBuffer *dest, VkBuffer *buf) {
+		return dest->PushAligned(&ub_lights, sizeof(ub_lights), uboAlignment_, buf);
+	}
+	// TODO: Only push half the bone buffer if we only have four bones.
+	uint32_t PushBoneBuffer(VulkanPushBuffer *dest, VkBuffer *buf) {
+		return dest->PushAligned(&ub_bones, sizeof(ub_bones), uboAlignment_, buf);
+	}
 
 private:
 	void Clear();
 
 	VulkanContext *vulkan_;
 
-	typedef std::map<ShaderID, VulkanFragmentShader *> FSCache;
+	typedef DenseHashMap<FShaderID, VulkanFragmentShader *, nullptr> FSCache;
 	FSCache fsCache_;
 
-	typedef std::map<ShaderID, VulkanVertexShader *> VSCache;
+	typedef DenseHashMap<VShaderID, VulkanVertexShader *, nullptr> VSCache;
 	VSCache vsCache_;
 
 	char *codeBuffer_;
@@ -139,6 +145,6 @@ private:
 	VulkanFragmentShader *lastFShader_;
 	VulkanVertexShader *lastVShader_;
 
-	ShaderID lastFSID_;
-	ShaderID lastVSID_;
+	FShaderID lastFSID_;
+	VShaderID lastVSID_;
 };

@@ -21,6 +21,7 @@
 #include <unordered_map>
 
 #include "Common/CommonTypes.h"
+#include "Common/Hashmaps.h"
 
 #include "GPU/GPUState.h"
 #include "GPU/Common/GPUDebugInterface.h"
@@ -48,8 +49,6 @@ public:
 	DrawEngineCommon();
 	virtual ~DrawEngineCommon();
 
-	bool TestBoundingBox(void* control_points, int vertexCount, u32 vertType);
-
 	bool GetCurrentSimpleVertices(int count, std::vector<GPUDebugVertex> &vertices, std::vector<u16> &indices);
 
 	static u32 NormalizeVertices(u8 *outPtr, u8 *bufPtr, const u8 *inPtr, VertexDecoder *dec, int lowerBound, int upperBound, u32 vertType);
@@ -60,6 +59,7 @@ public:
 	// Same for SubmitPrim
 	virtual void DispatchSubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertType, int *bytesRead) = 0;
 
+	bool TestBoundingBox(void* control_points, int vertexCount, u32 vertType, int *bytesRead);
 	void SubmitSpline(const void *control_points, const void *indices, int tess_u, int tess_v, int count_u, int count_v, int type_u, int type_v, GEPatchPrimType prim_type, bool computeNormals, bool patchFacing, u32 vertType, int *bytesRead);
 	void SubmitBezier(const void *control_points, const void *indices, int tess_u, int tess_v, int count_u, int count_v, GEPatchPrimType prim_type, bool computeNormals, bool patchFacing, u32 vertType, int *bytesRead);
 
@@ -70,11 +70,18 @@ public:
 
 	void SetupVertexDecoder(u32 vertType);
 
+	bool IsCodePtrVertexDecoder(const u8 *ptr) const {
+		return decJitCache_->IsInSpace(ptr);
+	}
+
 protected:
 	virtual void ClearTrackedVertexArrays() {}
 
+	int ComputeNumVertsToDecode() const;
+	void DecodeVerts(u8 *dest);
+
 	// Preprocessing for spline/bezier
-	u32 NormalizeVertices(u8 *outPtr, u8 *bufPtr, const u8 *inPtr, int lowerBound, int upperBound, u32 vertType);
+	u32 NormalizeVertices(u8 *outPtr, u8 *bufPtr, const u8 *inPtr, int lowerBound, int upperBound, u32 vertType, int *vertexSize = nullptr);
 
 	// Utility for vertex caching
 	u32 ComputeMiniHash();
@@ -104,7 +111,7 @@ protected:
 
 	// Cached vertex decoders
 	u32 lastVType_ = -1;
-	std::unordered_map<u32, VertexDecoder *> decoderMap_;
+	DenseHashMap<u32, VertexDecoder *, nullptr> decoderMap_;
 	VertexDecoder *dec_ = nullptr;
 	VertexDecoderJitCache *decJitCache_ = nullptr;
 	VertexDecoderOptions decOptions_{};
@@ -150,14 +157,19 @@ protected:
 	int numPatches;
 	class TessellationDataTransfer {
 	protected:
+		// TODO: These aren't used by all backends.
 		int prevSize;
 		int prevSizeTex;
 		int prevSizeCol;
 	public:
 		virtual ~TessellationDataTransfer() {}
 		// Send spline/bezier's control points to vertex shader through floating point texture.
+		virtual void PrepareBuffers(float *&pos, float *&tex, float *&col, int &posStride, int &texStride, int &colStride, int size, bool hasColor, bool hasTexCoords) {
+			posStride = 4;
+			texStride = 4;
+			colStride = 4;
+		}
 		virtual void SendDataToShader(const float *pos, const float *tex, const float *col, int size, bool hasColor, bool hasTexCoords) = 0;
-		virtual void PrepareBuffers(float *&pos, float *&tex, float *&col, int size, bool hasColor, bool hasTexCoords) {};
 	};
 	TessellationDataTransfer *tessDataTransfer;
 };

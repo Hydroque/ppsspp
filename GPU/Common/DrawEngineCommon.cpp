@@ -33,7 +33,7 @@ enum {
 	TRANSFORMED_VERTEX_BUFFER_SIZE = VERTEX_BUFFER_MAX * sizeof(TransformedVertex)
 };
 
-DrawEngineCommon::DrawEngineCommon() {
+DrawEngineCommon::DrawEngineCommon() : decoderMap_(16) {
 	quadIndices_ = new u16[6 * QUAD_INDICES_MAX];
 	decJitCache_ = new VertexDecoderJitCache();
 	transformed = (TransformedVertex *)AllocateMemoryPages(TRANSFORMED_VERTEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
@@ -45,9 +45,9 @@ DrawEngineCommon::~DrawEngineCommon() {
 	FreeMemoryPages(transformedExpanded, 3 * TRANSFORMED_VERTEX_BUFFER_SIZE);
 	delete[] quadIndices_;
 	delete decJitCache_;
-	for (auto iter = decoderMap_.begin(); iter != decoderMap_.end(); iter++) {
-		delete iter->second;
-	}
+	decoderMap_.Iterate([&](const uint32_t vtype, VertexDecoder *decoder) {
+		delete decoder;
+	});
 }
 
 void DrawEngineCommon::SetupVertexDecoder(u32 vertType) {
@@ -63,34 +63,77 @@ void DrawEngineCommon::SetupVertexDecoder(u32 vertType) {
 }
 
 VertexDecoder *DrawEngineCommon::GetVertexDecoder(u32 vtype) {
-	auto iter = decoderMap_.find(vtype);
-	if (iter != decoderMap_.end())
-		return iter->second;
-	VertexDecoder *dec = new VertexDecoder();
+	VertexDecoder *dec = decoderMap_.Get(vtype);
+	if (dec)
+		return dec;
+	dec = new VertexDecoder();
 	dec->SetVertexType(vtype, decOptions_, decJitCache_);
-	decoderMap_[vtype] = dec;
+	decoderMap_.Insert(vtype, dec);
 	return dec;
+}
+
+int DrawEngineCommon::ComputeNumVertsToDecode() const {
+	int vertsToDecode = 0;
+	if (drawCalls[0].indexType == GE_VTYPE_IDX_NONE >> GE_VTYPE_IDX_SHIFT) {
+		for (int i = 0; i < numDrawCalls; i++) {
+			const DeferredDrawCall &dc = drawCalls[i];
+			vertsToDecode += dc.vertexCount;
+		}
+	} else {
+		// TODO: Share this computation with DecodeVertsStep?
+		for (int i = 0; i < numDrawCalls; i++) {
+			const DeferredDrawCall &dc = drawCalls[i];
+			int lastMatch = i;
+			const int total = numDrawCalls;
+			int indexLowerBound = dc.indexLowerBound;
+			int indexUpperBound = dc.indexUpperBound;
+			for (int j = i + 1; j < total; ++j) {
+				if (drawCalls[j].verts != dc.verts)
+					break;
+
+				indexLowerBound = std::min(indexLowerBound, (int)drawCalls[j].indexLowerBound);
+				indexUpperBound = std::max(indexUpperBound, (int)drawCalls[j].indexUpperBound);
+				lastMatch = j;
+			}
+			vertsToDecode += indexUpperBound - indexLowerBound + 1;
+			i = lastMatch;
+		}
+	}
+	return vertsToDecode;
+}
+
+void DrawEngineCommon::DecodeVerts(u8 *dest) {
+	const UVScale origUV = gstate_c.uv;
+	for (; decodeCounter_ < numDrawCalls; decodeCounter_++) {
+		gstate_c.uv = uvScale[decodeCounter_];
+		DecodeVertsStep(dest, decodeCounter_, decodedVerts_);  // NOTE! DecodeVertsStep can modify decodeCounter_!
+	}
+	gstate_c.uv = origUV;
+
+	// Sanity check
+	if (indexGen.Prim() < 0) {
+		ERROR_LOG_REPORT(G3D, "DecodeVerts: Failed to deduce prim: %i", indexGen.Prim());
+		// Force to points (0)
+		indexGen.AddPrim(GE_PRIM_POINTS, 0);
+	}
 }
 
 std::vector<std::string> DrawEngineCommon::DebugGetVertexLoaderIDs() {
 	std::vector<std::string> ids;
-	for (auto iter : decoderMap_) {
+	decoderMap_.Iterate([&](const uint32_t vtype, VertexDecoder *decoder) {
 		std::string id;
-		id.resize(sizeof(iter.first));
-		memcpy(&id[0], &iter.first, sizeof(iter.first));
+		id.resize(sizeof(vtype));
+		memcpy(&id[0], &vtype, sizeof(vtype));
 		ids.push_back(id);
-	}
+	});
 	return ids;
 }
 
 std::string DrawEngineCommon::DebugGetVertexLoaderString(std::string id, DebugShaderStringType stringType) {
 	u32 mapId;
 	memcpy(&mapId, &id[0], sizeof(mapId));
-	auto iter = decoderMap_.find(mapId);
-	if (iter == decoderMap_.end())
-		return "N/A";
-	else
-		return iter->second->GetString(stringType);
+	VertexDecoder *dec = decoderMap_.Get(mapId);
+	return dec ? dec->GetString(stringType) : "N/A";
 }
 
 struct Plane {
@@ -136,16 +179,18 @@ void DrawEngineCommon::Resized() {
 	decJitCache_->Clear();
 	lastVType_ = -1;
 	dec_ = nullptr;
-	for (auto iter = decoderMap_.begin(); iter != decoderMap_.end(); iter++) {
-		delete iter->second;
-	}
-	decoderMap_.clear();
+	decoderMap_.Iterate([&](const uint32_t vtype, VertexDecoder *decoder) {
+		delete decoder;
+	});
+	decoderMap_.Clear();
 	ClearTrackedVertexArrays();
 }
 
-u32 DrawEngineCommon::NormalizeVertices(u8 *outPtr, u8 *bufPtr, const u8 *inPtr, int lowerBound, int upperBound, u32 vertType) {
+u32 DrawEngineCommon::NormalizeVertices(u8 *outPtr, u8 *bufPtr, const u8 *inPtr, int lowerBound, int upperBound, u32 vertType, int *vertexSize) {
 	const u32 vertTypeID = (vertType & 0xFFFFFF) | (gstate.getUVGenMode() << 24);
 	VertexDecoder *dec = GetVertexDecoder(vertTypeID);
+	if (vertexSize)
+		*vertexSize = dec->VertexSize();
 	return DrawEngineCommon::NormalizeVertices(outPtr, bufPtr, inPtr, dec, lowerBound, upperBound, vertType);
 }
 
@@ -153,7 +198,7 @@ u32 DrawEngineCommon::NormalizeVertices(u8 *outPtr, u8 *bufPtr, const u8 *inPtr,
 //
 // It does the simplest and safest test possible: If all points of a bbox is outside a single of
 // our clipping planes, we reject the box. Tighter bounds would be desirable but would take more calculations.
-bool DrawEngineCommon::TestBoundingBox(void* control_points, int vertexCount, u32 vertType) {
+bool DrawEngineCommon::TestBoundingBox(void* control_points, int vertexCount, u32 vertType, int *bytesRead) {
 	SimpleVertex *corners = (SimpleVertex *)(decoded + 65536 * 12);
 	float *verts = (float *)(decoded + 65536 * 18);
 
@@ -161,25 +206,30 @@ bool DrawEngineCommon::TestBoundingBox(void* control_points, int vertexCount, u3
 	// and a large vertex format.
 	if ((vertType & 0xFFFFFF) == GE_VTYPE_POS_FLOAT) {
 		verts = (float *)control_points;
+		*bytesRead = 3 * sizeof(float) * vertexCount;
 	} else if ((vertType & 0xFFFFFF) == GE_VTYPE_POS_8BIT) {
 		const s8 *vtx = (const s8 *)control_points;
 		for (int i = 0; i < vertexCount * 3; i++) {
 			verts[i] = vtx[i] * (1.0f / 128.0f);
 		}
+		*bytesRead = 3 * sizeof(s8) * vertexCount;
 	} else if ((vertType & 0xFFFFFF) == GE_VTYPE_POS_16BIT) {
 		const s16 *vtx = (const s16*)control_points;
 		for (int i = 0; i < vertexCount * 3; i++) {
 			verts[i] = vtx[i] * (1.0f / 32768.0f);
 		}
+		*bytesRead = 3 * sizeof(s16) * vertexCount;
 	} else {
 		// Simplify away bones and morph before proceeding
 		u8 *temp_buffer = decoded + 65536 * 24;
-		NormalizeVertices((u8 *)corners, temp_buffer, (u8 *)control_points, 0, vertexCount, vertType);
+		int vertexSize = 0;
+		NormalizeVertices((u8 *)corners, temp_buffer, (u8 *)control_points, 0, vertexCount, vertType, &vertexSize);
 		for (int i = 0; i < vertexCount; i++) {
 			verts[i * 3] = corners[i].pos.x;
 			verts[i * 3 + 1] = corners[i].pos.y;
 			verts[i * 3 + 2] = corners[i].pos.z;
 		}
+		*bytesRead = vertexSize * vertexCount;
 	}
 
 	Plane planes[6];
@@ -439,7 +489,7 @@ u32 DrawEngineCommon::NormalizeVertices(u8 *outPtr, u8 *bufPtr, const u8 *inPtr,
 }
 
 bool DrawEngineCommon::ApplyShaderBlending() {
-	if (gstate_c.featureFlags & GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH) {
+	if (gstate_c.Supports(GPU_SUPPORTS_ANY_FRAMEBUFFER_FETCH)) {
 		return true;
 	}
 

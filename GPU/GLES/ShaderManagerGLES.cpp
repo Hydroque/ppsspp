@@ -22,6 +22,7 @@
 #include <map>
 #include <cstdio>
 
+#include "math/dataconv.h"
 #include "base/logging.h"
 #include "base/timeutil.h"
 #include "gfx/gl_debug_log.h"
@@ -42,8 +43,8 @@
 #include "GPU/GLES/DrawEngineGLES.h"
 #include "FramebufferManagerGLES.h"
 
-Shader::Shader(const char *code, uint32_t glShaderType, bool useHWTransform)
-	  : failed_(false), useHWTransform_(useHWTransform) {
+Shader::Shader(const ShaderID &id, const char *code, uint32_t glShaderType, bool useHWTransform, uint32_t attrMask, uint64_t uniformMask)
+	  : failed_(false), useHWTransform_(useHWTransform), attrMask_(attrMask), uniformMask_(uniformMask) {
 	PROFILE_THIS_SCOPE("shadercomp");
 	isFragment_ = glShaderType == GL_FRAGMENT_SHADER;
 	source_ = code;
@@ -69,10 +70,12 @@ Shader::Shader(const char *code, uint32_t glShaderType, bool useHWTransform)
 		ELOG("Error in shader compilation! %s\n", infoLog);
 		ELOG("Shader source:\n%s\n", (const char *)code);
 #endif
-		ERROR_LOG(G3D, "Error in shader compilation!\n");
-		ERROR_LOG(G3D, "Info log: %s\n", infoLog);
+
+		std::string desc = GetShaderString(SHADER_STRING_SHORT_DESC, id);
+		ERROR_LOG(G3D, "Error in shader compilation for: %s", desc.c_str());
+		ERROR_LOG(G3D, "Info log: %s", infoLog);
 		ERROR_LOG(G3D, "Shader source:\n%s\n", (const char *)code);
-		Reporting::ReportMessage("Error in shader compilation: info: %s / code: %s", infoLog, (const char *)code);
+		Reporting::ReportMessage("Error in shader compilation: info: %s\n%s\n%s", infoLog, desc.c_str(), (const char *)code);
 #ifdef SHADERLOG
 		OutputDebugStringUTF8(infoLog);
 #endif
@@ -89,8 +92,8 @@ Shader::~Shader() {
 		glDeleteShader(shader);
 }
 
-LinkedShader::LinkedShader(ShaderID VSID, Shader *vs, ShaderID FSID, Shader *fs, bool useHWTransform)
-		: useHWTransform_(useHWTransform), program(0), dirtyUniforms(0) {
+LinkedShader::LinkedShader(VShaderID VSID, Shader *vs, FShaderID FSID, Shader *fs, bool useHWTransform, bool preloading)
+		: useHWTransform_(useHWTransform) {
 	PROFILE_THIS_SCOPE("shaderlink");
 
 	program = glCreateProgram();
@@ -110,7 +113,7 @@ LinkedShader::LinkedShader(ShaderID VSID, Shader *vs, ShaderID FSID, Shader *fs,
 	glBindAttribLocation(program, ATTR_COLOR1, "color1");
 
 #if !defined(USING_GLES2)
-	if (gstate_c.featureFlags & GPU_SUPPORTS_DUALSOURCE_BLEND) {
+	if (gstate_c.Supports(GPU_SUPPORTS_DUALSOURCE_BLEND)) {
 		// Dual source alpha
 		glBindFragDataLocationIndexed(program, 0, 0, "fragColor0");
 		glBindFragDataLocationIndexed(program, 0, 1, "fragColor1");
@@ -119,7 +122,7 @@ LinkedShader::LinkedShader(ShaderID VSID, Shader *vs, ShaderID FSID, Shader *fs,
 	}
 #elif !defined(IOS)
 	if (gl_extensions.GLES3) {
-		if (gstate_c.featureFlags & GPU_SUPPORTS_DUALSOURCE_BLEND) {
+		if (gstate_c.Supports(GPU_SUPPORTS_DUALSOURCE_BLEND)) {
 			glBindFragDataLocationIndexedEXT(program, 0, 0, "fragColor0");
 			glBindFragDataLocationIndexedEXT(program, 0, 1, "fragColor1");
 		}
@@ -140,13 +143,21 @@ LinkedShader::LinkedShader(ShaderID VSID, Shader *vs, ShaderID FSID, Shader *fs,
 			ELOG("Could not link program:\n %s", buf);
 #endif
 			ERROR_LOG(G3D, "Could not link program:\n %s", buf);
-			ERROR_LOG(G3D, "VS desc:\n%s\n", vs->GetShaderString(SHADER_STRING_SHORT_DESC, VSID).c_str());
-			ERROR_LOG(G3D, "FS desc:\n%s\n", fs->GetShaderString(SHADER_STRING_SHORT_DESC, FSID).c_str());
+
+			std::string vs_desc = vs->GetShaderString(SHADER_STRING_SHORT_DESC, VSID);
+			std::string fs_desc = fs->GetShaderString(SHADER_STRING_SHORT_DESC, FSID);
 			std::string vs_source = vs->GetShaderString(SHADER_STRING_SOURCE_CODE, VSID);
 			std::string fs_source = fs->GetShaderString(SHADER_STRING_SOURCE_CODE, FSID);
+
+			ERROR_LOG(G3D, "VS desc:\n%s", vs_desc.c_str());
+			ERROR_LOG(G3D, "FS desc:\n%s", fs_desc.c_str());
 			ERROR_LOG(G3D, "VS:\n%s\n", vs_source.c_str());
 			ERROR_LOG(G3D, "FS:\n%s\n", fs_source.c_str());
-			Reporting::ReportMessage("Error in shader program link: info: %s / fs: %s / vs: %s", buf, fs_source.c_str(), vs_source.c_str());
+			if (preloading) {
+				Reporting::ReportMessage("Error in shader program link during preload: info: %s\nfs: %s\n%s\nvs: %s\n%s", buf, fs_desc.c_str(), fs_source.c_str(), vs_desc.c_str(), vs_source.c_str());
+			} else {
+				Reporting::ReportMessage("Error in shader program link: info: %s\nfs: %s\n%s\nvs: %s\n%s", buf, fs_desc.c_str(), fs_source.c_str(), vs_desc.c_str(), vs_source.c_str());
+			}
 #ifdef SHADERLOG
 			OutputDebugStringUTF8(buf);
 			OutputDebugStringUTF8(vs_source.c_str());
@@ -240,62 +251,8 @@ LinkedShader::LinkedShader(ShaderID VSID, Shader *vs, ShaderID FSID, Shader *fs,
 	u_spline_type_u = glGetUniformLocation(program, "u_spline_type_u");
 	u_spline_type_v = glGetUniformLocation(program, "u_spline_type_v");
 
-	attrMask = 0;
-	if (-1 != glGetAttribLocation(program, "position")) attrMask |= 1 << ATTR_POSITION;
-	if (-1 != glGetAttribLocation(program, "texcoord")) attrMask |= 1 << ATTR_TEXCOORD;
-	if (-1 != glGetAttribLocation(program, "normal")) attrMask |= 1 << ATTR_NORMAL;
-	if (-1 != glGetAttribLocation(program, "w1")) attrMask |= 1 << ATTR_W1;
-	if (-1 != glGetAttribLocation(program, "w2")) attrMask |= 1 << ATTR_W2;
-	if (-1 != glGetAttribLocation(program, "color0")) attrMask |= 1 << ATTR_COLOR0;
-	if (-1 != glGetAttribLocation(program, "color1")) attrMask |= 1 << ATTR_COLOR1;
-
-	availableUniforms = 0;
-	if (u_proj != -1) availableUniforms |= DIRTY_PROJMATRIX;
-	if (u_proj_through != -1) availableUniforms |= DIRTY_PROJTHROUGHMATRIX;
-	if (u_texenv != -1) availableUniforms |= DIRTY_TEXENV;
-	if (u_alphacolorref != -1) availableUniforms |= DIRTY_ALPHACOLORREF;
-	if (u_alphacolormask != -1) availableUniforms |= DIRTY_ALPHACOLORMASK;
-	if (u_fogcolor != -1) availableUniforms |= DIRTY_FOGCOLOR;
-	if (u_fogcoef != -1) availableUniforms |= DIRTY_FOGCOEF;
-	if (u_texenv != -1) availableUniforms |= DIRTY_TEXENV;
-	if (u_uvscaleoffset != -1) availableUniforms |= DIRTY_UVSCALEOFFSET;
-	if (u_texclamp != -1) availableUniforms |= DIRTY_TEXCLAMP;
-	if (u_world != -1) availableUniforms |= DIRTY_WORLDMATRIX;
-	if (u_view != -1) availableUniforms |= DIRTY_VIEWMATRIX;
-	if (u_texmtx != -1) availableUniforms |= DIRTY_TEXMATRIX;
-	if (u_stencilReplaceValue != -1) availableUniforms |= DIRTY_STENCILREPLACEVALUE;
-	if (u_blendFixA != -1 || u_blendFixB != -1 || u_fbotexSize != -1) availableUniforms |= DIRTY_SHADERBLEND;
-	if (u_depthRange != -1)
-		availableUniforms |= DIRTY_DEPTHRANGE;
-
-	// Looping up to numBones lets us avoid checking u_bone[i]
-#ifdef USE_BONE_ARRAY
-	if (u_bone != -1) {
-		for (int i = 0; i < numBones; i++) {
-			availableUniforms |= DIRTY_BONEMATRIX0 << i;
-		}
-	}
-#else
-	for (int i = 0; i < numBones; i++) {
-		if (u_bone[i] != -1)
-			availableUniforms |= DIRTY_BONEMATRIX0 << i;
-	}
-#endif
-	if (u_ambient != -1) availableUniforms |= DIRTY_AMBIENT;
-	if (u_matambientalpha != -1) availableUniforms |= DIRTY_MATAMBIENTALPHA;
-	if (u_matdiffuse != -1) availableUniforms |= DIRTY_MATDIFFUSE;
-	if (u_matemissive != -1) availableUniforms |= DIRTY_MATEMISSIVE;
-	if (u_matspecular != -1) availableUniforms |= DIRTY_MATSPECULAR;
-	for (int i = 0; i < 4; i++) {
-		if (u_lightdir[i] != -1 ||
-				u_lightspecular[i] != -1 ||
-				u_lightpos[i] != -1)
-			availableUniforms |= DIRTY_LIGHT0 << i;
-	}
-	if (u_spline_count_u != -1) availableUniforms |= DIRTY_BEZIERSPLINE;
-	if (u_spline_count_v != -1) availableUniforms |= DIRTY_BEZIERSPLINE;
-	if (u_spline_type_u != -1) availableUniforms |= DIRTY_BEZIERSPLINE;
-	if (u_spline_type_v != -1) availableUniforms |= DIRTY_BEZIERSPLINE;
+	attrMask = vs->GetAttrMask();
+	availableUniforms = vs->GetUniformMask() | fs->GetUniformMask();
 
 	glUseProgram(program);
 
@@ -303,7 +260,6 @@ LinkedShader::LinkedShader(ShaderID VSID, Shader *vs, ShaderID FSID, Shader *fs,
 	glUniform1i(u_tex, 0);
 	glUniform1i(u_fbotex, 1);
 	glUniform1i(u_testtex, 2);
-
 	
 	if (u_tess_pos_tex != -1)
 		glUniform1i(u_tess_pos_tex, 4); // Texture unit 4
@@ -324,27 +280,20 @@ LinkedShader::~LinkedShader() {
 
 // Utility
 static void SetColorUniform3(int uniform, u32 color) {
-	const float col[3] = {
-		((color & 0xFF)) / 255.0f,
-		((color & 0xFF00) >> 8) / 255.0f,
-		((color & 0xFF0000) >> 16) / 255.0f
-	};
-	glUniform3fv(uniform, 1, col);
+	float f[4];
+	Uint8x4ToFloat4(f, color);
+	glUniform3fv(uniform, 1, f);
 }
 
 static void SetColorUniform3Alpha(int uniform, u32 color, u8 alpha) {
-	const float col[4] = {
-		((color & 0xFF)) / 255.0f,
-		((color & 0xFF00) >> 8) / 255.0f,
-		((color & 0xFF0000) >> 16) / 255.0f,
-		alpha/255.0f
-	};
-	glUniform4fv(uniform, 1, col);
+	float f[4];
+	Uint8x3ToFloat4_AlphaUint8(f, color, alpha);
+	glUniform4fv(uniform, 1, f);
 }
 
 // This passes colors unscaled (e.g. 0 - 255 not 0 - 1.)
 static void SetColorUniform3Alpha255(int uniform, u32 color, u8 alpha) {
-	if (gl_extensions.gpuVendor == GPU_VENDOR_POWERVR) {
+	if (gl_extensions.gpuVendor == GPU_VENDOR_IMGTEC) {
 		const float col[4] = {
 			(float)((color & 0xFF) >> 0) * (1.0f / 255.0f),
 			(float)((color & 0xFF00) >> 8) * (1.0f / 255.0f),
@@ -383,11 +332,10 @@ static void SetColorUniform3ExtraFloat(int uniform, u32 color, float extra) {
 	glUniform4fv(uniform, 1, col);
 }
 
-static void SetFloat24Uniform3(int uniform, const u32 data[3]) {
-	const u32 col[3] = {
-		data[0] << 8, data[1] << 8, data[2] << 8
-	};
-	glUniform3fv(uniform, 1, (const GLfloat *)&col[0]);
+static void SetFloat24Uniform3(int uniform, const uint32_t data[3]) {
+	float f[4];
+	ExpandFloat24x3ToFloat4(f, data);
+	glUniform3fv(uniform, 1, f);
 }
 
 static void SetFloatUniform4(int uniform, float data[4]) {
@@ -411,7 +359,7 @@ static inline void ScaleProjMatrix(Matrix4x4 &in) {
 	in.translateAndScale(trans, scale);
 }
 
-void LinkedShader::use(const ShaderID &VSID, LinkedShader *previous) {
+void LinkedShader::use(const VShaderID &VSID, LinkedShader *previous) {
 	glUseProgram(program);
 	int enable, disable;
 	if (previous) {
@@ -436,7 +384,7 @@ void LinkedShader::stop() {
 	}
 }
 
-void LinkedShader::UpdateUniforms(u32 vertType, const ShaderID &vsid) {
+void LinkedShader::UpdateUniforms(u32 vertType, const VShaderID &vsid) {
 	CHECK_GL_ERROR_IF_DEBUG();
 
 	u64 dirty = dirtyUniforms & availableUniforms;
@@ -747,7 +695,7 @@ void LinkedShader::UpdateUniforms(u32 vertType, const ShaderID &vsid) {
 }
 
 ShaderManagerGLES::ShaderManagerGLES()
-		: lastShader_(nullptr), shaderSwitchDirty_(0), diskCacheDirty_(false) {
+		: lastShader_(nullptr), shaderSwitchDirtyUniforms_(0), diskCacheDirty_(false), fsCache_(16), vsCache_(16) {
 	codeBuffer_ = new char[16384];
 	lastFSID_.set_invalid();
 	lastVSID_.set_invalid();
@@ -762,18 +710,15 @@ void ShaderManagerGLES::Clear() {
 	for (auto iter = linkedShaderCache_.begin(); iter != linkedShaderCache_.end(); ++iter) {
 		delete iter->ls;
 	}
-	for (auto iter = fsCache_.begin(); iter != fsCache_.end(); ++iter)	{
-		delete iter->second;
-	}
-	for (auto iter = vsCache_.begin(); iter != vsCache_.end(); ++iter)	{
-		delete iter->second;
-	}
+	fsCache_.Iterate([&](const FShaderID &key, Shader *shader) {
+		delete shader;
+	});
+	vsCache_.Iterate([&](const VShaderID &key, Shader *shader) {
+		delete shader;
+	});
 	linkedShaderCache_.clear();
-	fsCache_.clear();
-	vsCache_.clear();
-	gstate_c.Dirty(DIRTY_ALL_UNIFORMS);
-	lastFSID_.set_invalid();
-	lastVSID_.set_invalid();
+	fsCache_.Clear();
+	vsCache_.Clear();
 	DirtyShader();
 }
 
@@ -787,8 +732,8 @@ void ShaderManagerGLES::DirtyShader() {
 	lastFSID_.set_invalid();
 	lastVSID_.set_invalid();
 	DirtyLastShader();
-	gstate_c.Dirty(DIRTY_ALL_UNIFORMS);
-	shaderSwitchDirty_ = 0;
+	gstate_c.Dirty(DIRTY_ALL_UNIFORMS | DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE);
+	shaderSwitchDirtyUniforms_ = 0;
 }
 
 void ShaderManagerGLES::DirtyLastShader() { // disables vertex arrays
@@ -798,45 +743,49 @@ void ShaderManagerGLES::DirtyLastShader() { // disables vertex arrays
 	lastVShaderSame_ = false;
 }
 
-Shader *ShaderManagerGLES::CompileFragmentShader(ShaderID FSID) {
-	if (!GenerateFragmentShader(FSID, codeBuffer_)) {
+Shader *ShaderManagerGLES::CompileFragmentShader(FShaderID FSID) {
+	uint64_t uniformMask;
+	if (!GenerateFragmentShader(FSID, codeBuffer_, &uniformMask)) {
 		return nullptr;
 	}
-	return new Shader(codeBuffer_, GL_FRAGMENT_SHADER, false);
+	return new Shader(FSID, codeBuffer_, GL_FRAGMENT_SHADER, false, 0, uniformMask);
 }
 
-Shader *ShaderManagerGLES::CompileVertexShader(ShaderID VSID) {
+Shader *ShaderManagerGLES::CompileVertexShader(VShaderID VSID) {
 	bool useHWTransform = VSID.Bit(VS_BIT_USE_HW_TRANSFORM);
-	GenerateVertexShader(VSID, codeBuffer_);
-	return new Shader(codeBuffer_, GL_VERTEX_SHADER, useHWTransform);
+	uint32_t attrMask;
+	uint64_t uniformMask;
+	GenerateVertexShader(VSID, codeBuffer_, &attrMask, &uniformMask);
+	return new Shader(VSID, codeBuffer_, GL_VERTEX_SHADER, useHWTransform, attrMask, uniformMask);
 }
 
-Shader *ShaderManagerGLES::ApplyVertexShader(int prim, u32 vertType, ShaderID *VSID) {
+Shader *ShaderManagerGLES::ApplyVertexShader(int prim, u32 vertType, VShaderID *VSID) {
 	uint64_t dirty = gstate_c.GetDirtyUniforms();
 	if (dirty) {
 		if (lastShader_)
 			lastShader_->dirtyUniforms |= dirty;
-		shaderSwitchDirty_ |= dirty;
+		shaderSwitchDirtyUniforms_ |= dirty;
 		gstate_c.CleanUniforms();
 	}
 
-	bool useHWTransform = CanUseHardwareTransform(prim);
+	if (gstate_c.IsDirty(DIRTY_VERTEXSHADER_STATE)) {
+		gstate_c.Clean(DIRTY_VERTEXSHADER_STATE);
+		bool useHWTransform = CanUseHardwareTransform(prim);
+		ComputeVertexShaderID(VSID, vertType, useHWTransform);
+	} else {
+		*VSID = lastVSID_;
+	}
 
-	ComputeVertexShaderID(VSID, vertType, useHWTransform);
-
-	// Just update uniforms if this is the same shader as last time.
 	if (lastShader_ != 0 && *VSID == lastVSID_) {
 		lastVShaderSame_ = true;
 		return lastShader_->vs_;  	// Already all set.
 	} else {
 		lastVShaderSame_ = false;
 	}
-
 	lastVSID_ = *VSID;
 
-	VSCache::iterator vsIter = vsCache_.find(*VSID);
-	Shader *vs;
-	if (vsIter == vsCache_.end())	{
+	Shader *vs = vsCache_.Get(*VSID);
+	if (!vs)	{
 		// Vertex shader not in cache. Let's compile it.
 		vs = CompileVertexShader(*VSID);
 		if (vs->Failed()) {
@@ -852,23 +801,29 @@ Shader *ShaderManagerGLES::ApplyVertexShader(int prim, u32 vertType, ShaderID *V
 			// next time and we'll do this over and over...
 
 			// Can still work with software transform.
-			ShaderID vsidTemp;
+			VShaderID vsidTemp;
 			ComputeVertexShaderID(&vsidTemp, vertType, false);
-			GenerateVertexShader(vsidTemp, codeBuffer_);
-			vs = new Shader(codeBuffer_, GL_VERTEX_SHADER, false);
+			uint32_t attrMask;
+			uint64_t uniformMask;
+			GenerateVertexShader(vsidTemp, codeBuffer_, &attrMask, &uniformMask);
+			vs = new Shader(vsidTemp, codeBuffer_, GL_VERTEX_SHADER, false, attrMask, uniformMask);
 		}
 
-		vsCache_[*VSID] = vs;
+		vsCache_.Insert(*VSID, vs);
 		diskCacheDirty_ = true;
-	} else {
-		vs = vsIter->second;
 	}
 	return vs;
 }
 
-LinkedShader *ShaderManagerGLES::ApplyFragmentShader(ShaderID VSID, Shader *vs, u32 vertType, int prim) {
-	ShaderID FSID;
-	ComputeFragmentShaderID(&FSID);
+LinkedShader *ShaderManagerGLES::ApplyFragmentShader(VShaderID VSID, Shader *vs, u32 vertType, int prim) {
+	FShaderID FSID;
+	if (gstate_c.IsDirty(DIRTY_FRAGMENTSHADER_STATE)) {
+		gstate_c.Clean(DIRTY_FRAGMENTSHADER_STATE);
+		ComputeFragmentShaderID(&FSID);
+	} else {
+		FSID = lastFSID_;
+	}
+
 	if (lastVShaderSame_ && FSID == lastFSID_) {
 		lastShader_->UpdateUniforms(vertType, VSID);
 		return lastShader_;
@@ -876,21 +831,18 @@ LinkedShader *ShaderManagerGLES::ApplyFragmentShader(ShaderID VSID, Shader *vs, 
 
 	lastFSID_ = FSID;
 
-	FSCache::iterator fsIter = fsCache_.find(FSID);
-	Shader *fs;
-	if (fsIter == fsCache_.end())	{
+	Shader *fs = fsCache_.Get(FSID);
+	if (!fs)	{
 		// Fragment shader not in cache. Let's compile it.
 		fs = CompileFragmentShader(FSID);
-		fsCache_[FSID] = fs;
+		fsCache_.Insert(FSID, fs);
 		diskCacheDirty_ = true;
-	} else {
-		fs = fsIter->second;
 	}
 
 	// Okay, we have both shaders. Let's see if there's a linked one.
 	LinkedShader *ls = nullptr;
 
-	u64 switchDirty = shaderSwitchDirty_;
+	u64 switchDirty = shaderSwitchDirtyUniforms_;
 	for (auto iter = linkedShaderCache_.begin(); iter != linkedShaderCache_.end(); ++iter) {
 		// Deferred dirtying! Let's see if we can make this even more clever later.
 		iter->ls->dirtyUniforms |= switchDirty;
@@ -899,10 +851,14 @@ LinkedShader *ShaderManagerGLES::ApplyFragmentShader(ShaderID VSID, Shader *vs, 
 			ls = iter->ls;
 		}
 	}
-	shaderSwitchDirty_ = 0;
-
+	shaderSwitchDirtyUniforms_ = 0;
 
 	if (ls == nullptr) {
+		_dbg_assert_(G3D, FSID.Bit(FS_BIT_LMODE) == VSID.Bit(VS_BIT_LMODE));
+		_dbg_assert_(G3D, FSID.Bit(FS_BIT_DO_TEXTURE) == VSID.Bit(VS_BIT_DO_TEXTURE));
+		_dbg_assert_(G3D, FSID.Bit(FS_BIT_ENABLE_FOG) == VSID.Bit(VS_BIT_ENABLE_FOG));
+		_dbg_assert_(G3D, FSID.Bit(FS_BIT_FLATSHADE) == VSID.Bit(VS_BIT_FLATSHADE));
+
 		// Check if we can link these.
 		ls = new LinkedShader(VSID, vs, FSID, fs, vs->UseHWTransform());
 		ls->use(VSID, lastShader_);
@@ -934,18 +890,20 @@ std::vector<std::string> ShaderManagerGLES::DebugGetShaderIDs(DebugShaderType ty
 	switch (type) {
 	case SHADER_TYPE_VERTEX:
 		{
-			for (auto iter : vsCache_) {
-				iter.first.ToString(&id);
-				ids.push_back(id);
-			}
+			vsCache_.Iterate([&](const VShaderID &id, Shader *shader) {
+				std::string idstr;
+				id.ToString(&idstr);
+				ids.push_back(idstr);
+			});
 		}
 		break;
 	case SHADER_TYPE_FRAGMENT:
 		{
-			for (auto iter : fsCache_) {
-				iter.first.ToString(&id);
-				ids.push_back(id);
-			}
+			fsCache_.Iterate([&](const FShaderID &id, Shader *shader) {
+				std::string idstr;
+				id.ToString(&idstr);
+				ids.push_back(idstr);
+			});
 		}
 		break;
 	default:
@@ -960,20 +918,14 @@ std::string ShaderManagerGLES::DebugGetShaderString(std::string id, DebugShaderT
 	switch (type) {
 	case SHADER_TYPE_VERTEX:
 	{
-		auto iter = vsCache_.find(shaderId);
-		if (iter == vsCache_.end()) {
-			return "";
-		}
-		return iter->second->GetShaderString(stringType, iter->first);
+		Shader *vs = vsCache_.Get(VShaderID(shaderId));
+		return vs ? vs->GetShaderString(stringType, shaderId) : "";
 	}
 
 	case SHADER_TYPE_FRAGMENT:
 	{
-		auto iter = fsCache_.find(shaderId);
-		if (iter == fsCache_.end()) {
-			return "";
-		}
-		return iter->second->GetShaderString(stringType, iter->first);
+		Shader *fs = fsCache_.Get(FShaderID(shaderId));
+		return fs->GetShaderString(stringType, shaderId);
 	}
 	default:
 		return "N/A";
@@ -992,7 +944,7 @@ std::string ShaderManagerGLES::DebugGetShaderString(std::string id, DebugShaderT
 // as sometimes these features might have an effect on the ID bits.
 
 #define CACHE_HEADER_MAGIC 0x83277592
-#define CACHE_VERSION 3
+#define CACHE_VERSION 5
 struct CacheHeader {
 	uint32_t magic;
 	uint32_t version;
@@ -1003,8 +955,9 @@ struct CacheHeader {
 	int numLinkedPrograms;
 };
 
-void ShaderManagerGLES::LoadAndPrecompile(const std::string &filename) {
+void ShaderManagerGLES::Load(const std::string &filename) {
 	File::IOFile f(filename, "rb");
+	u64 sz = f.GetSize();
 	if (!f.IsOpen()) {
 		return;
 	}
@@ -1016,56 +969,134 @@ void ShaderManagerGLES::LoadAndPrecompile(const std::string &filename) {
 		return;
 	}
 	time_update();
-	double start = time_now_d();
+	diskCachePending_.start = time_now_d();
+	diskCachePending_.Clear();
 
-	for (int i = 0; i < header.numVertexShaders; i++) {
-		ShaderID id;
-		if (!f.ReadArray(&id, 1)) {
-			ERROR_LOG(G3D, "Truncated shader cache file, aborting.");
-			return;
-		}
-		Shader *vs = CompileVertexShader(id);
-		if (vs->Failed()) {
-			// Give up on using the cache, just bail. We can't safely create the fallback shaders here
-			// without trying to deduce the vertType from the VSID.
-			ERROR_LOG(G3D, "Failed to compile a vertex shader loading from cache. Skipping rest of shader cache.");
-			delete vs;
-			return;
-		}
-		vsCache_[id] = vs;
+	// Sanity check the file contents
+	if (header.numFragmentShaders > 1000 || header.numVertexShaders > 1000 || header.numLinkedPrograms > 1000) {
+		ERROR_LOG(G3D, "Corrupt shader cache file header, aborting.");
+		return;
 	}
-	for (int i = 0; i < header.numFragmentShaders; i++) {
-		ShaderID id;
-		if (!f.ReadArray(&id, 1)) {
-			ERROR_LOG(G3D, "Truncated shader cache file, aborting.");
-			return;
-		}
-		fsCache_[id] = CompileFragmentShader(id);
+
+	// Also make sure the size makes sense, in case there's corruption.
+	u64 expectedSize = sizeof(header);
+	expectedSize += header.numVertexShaders * sizeof(VShaderID);
+	expectedSize += header.numFragmentShaders * sizeof(FShaderID);
+	expectedSize += header.numLinkedPrograms * (sizeof(VShaderID) + sizeof(FShaderID));
+	if (sz != expectedSize) {
+		ERROR_LOG(G3D, "Shader cache file is wrong size: %lld instead of %lld", sz, expectedSize);
+		return;
 	}
+
+	diskCachePending_.vert.resize(header.numVertexShaders);
+	if (!f.ReadArray(&diskCachePending_.vert[0], header.numVertexShaders)) {
+		diskCachePending_.vert.clear();
+		return;
+	}
+
+	diskCachePending_.frag.resize(header.numFragmentShaders);
+	if (!f.ReadArray(&diskCachePending_.frag[0], header.numFragmentShaders)) {
+		diskCachePending_.vert.clear();
+		diskCachePending_.frag.clear();
+		return;
+	}
+
 	for (int i = 0; i < header.numLinkedPrograms; i++) {
-		ShaderID vsid, fsid;
+		VShaderID vsid;
+		FShaderID fsid;
 		if (!f.ReadArray(&vsid, 1)) {
-			ERROR_LOG(G3D, "Truncated shader cache file, aborting.");
 			return;
 		}
 		if (!f.ReadArray(&fsid, 1)) {
-			ERROR_LOG(G3D, "Truncated shader cache file, aborting.");
 			return;
 		}
-		VSCache::iterator vs = vsCache_.find(vsid);
-		FSCache::iterator fs = fsCache_.find(fsid);
-		if (vs != vsCache_.end() && fs != fsCache_.end()) {
-			LinkedShader *ls = new LinkedShader(vsid, vs->second, fsid, fs->second, vs->second->UseHWTransform());
-			LinkedShaderCacheEntry entry(vs->second, fs->second, ls);
+		diskCachePending_.link.push_back(std::make_pair(vsid, fsid));
+	}
+
+	// Actual compilation happens in ContinuePrecompile(), called by GPU_GLES's IsReady.
+	NOTICE_LOG(G3D, "Precompiling the shader cache from '%s'", filename.c_str());
+	diskCacheDirty_ = false;
+}
+
+bool ShaderManagerGLES::ContinuePrecompile(float sliceTime) {
+	auto &pending = diskCachePending_;
+	if (pending.Done()) {
+		return true;
+	}
+
+	double start = real_time_now();
+	// Let's try to keep it under sliceTime if possible.
+	double end = start + sliceTime;
+
+	for (size_t &i = pending.vertPos; i < pending.vert.size(); i++) {
+		if (real_time_now() >= end) {
+			// We'll finish later.
+			return false;
+		}
+
+		const VShaderID &id = pending.vert[i];
+		if (!vsCache_.Get(id)) {
+			if (id.Bit(VS_BIT_IS_THROUGH) && id.Bit(VS_BIT_USE_HW_TRANSFORM)) {
+				// Clearly corrupt, bailing.
+				ERROR_LOG_REPORT(G3D, "Corrupt shader cache: Both IS_THROUGH and USE_HW_TRANSFORM set.");
+				pending.Clear();
+				return false;
+			}
+
+			Shader *vs = CompileVertexShader(id);
+			if (vs->Failed()) {
+				// Give up on using the cache, just bail. We can't safely create the fallback shaders here
+				// without trying to deduce the vertType from the VSID.
+				ERROR_LOG(G3D, "Failed to compile a vertex shader loading from cache. Skipping rest of shader cache.");
+				delete vs;
+				pending.Clear();
+				return false;
+			}
+			vsCache_.Insert(id, vs);
+		} else {
+			WARN_LOG(G3D, "Duplicate vertex shader found in GL shader cache, ignoring");
+		}
+	}
+
+	for (size_t &i = pending.fragPos; i < pending.frag.size(); i++) {
+		if (real_time_now() >= end) {
+			// We'll finish later.
+			return false;
+		}
+
+		const FShaderID &id = pending.frag[i];
+		if (!fsCache_.Get(id)) {
+			fsCache_.Insert(id, CompileFragmentShader(id));
+		} else {
+			WARN_LOG(G3D, "Duplicate fragment shader found in GL shader cache, ignoring");
+		}
+	}
+
+	for (size_t &i = pending.linkPos; i < pending.link.size(); i++) {
+		if (real_time_now() >= end) {
+			// We'll finish later.
+			return false;
+		}
+
+		const VShaderID &vsid = pending.link[i].first;
+		const FShaderID &fsid = pending.link[i].second;
+		Shader *vs = vsCache_.Get(vsid);
+		Shader *fs = fsCache_.Get(fsid);
+		if (vs && fs) {
+			LinkedShader *ls = new LinkedShader(vsid, vs, fsid, fs, vs->UseHWTransform(), true);
+			LinkedShaderCacheEntry entry(vs, fs, ls);
 			linkedShaderCache_.push_back(entry);
 		}
 	}
-	time_update();
-	double end = time_now_d();
 
-	NOTICE_LOG(G3D, "Compiled and linked %d programs (%d vertex, %d fragment) in %0.1f milliseconds", header.numLinkedPrograms, header.numVertexShaders, header.numFragmentShaders, 1000 * (end - start));
-	NOTICE_LOG(G3D, "Loaded the shader cache from '%s'", filename.c_str());
-	diskCacheDirty_ = false;
+	// Okay, finally done.  Time to report status.
+	time_update();
+	double finish = time_now_d();
+
+	NOTICE_LOG(G3D, "Compiled and linked %d programs (%d vertex, %d fragment) in %0.1f milliseconds", (int)pending.link.size(), (int)pending.vert.size(), (int)pending.frag.size(), 1000 * (finish - pending.start));
+	pending.Clear();
+
+	return true;
 }
 
 void ShaderManagerGLES::Save(const std::string &filename) {
@@ -1091,24 +1122,22 @@ void ShaderManagerGLES::Save(const std::string &filename) {
 	header.numFragmentShaders = GetNumFragmentShaders();
 	header.numLinkedPrograms = GetNumPrograms();
 	fwrite(&header, 1, sizeof(header), f);
-	for (auto iter : vsCache_) {
-		ShaderID id = iter.first;
+	vsCache_.Iterate([&](const ShaderID &id, Shader *shader) {
 		fwrite(&id, 1, sizeof(id), f);
-	}
-	for (auto iter : fsCache_) {
-		ShaderID id = iter.first;
+	});
+	fsCache_.Iterate([&](const ShaderID &id, Shader *shader) {
 		fwrite(&id, 1, sizeof(id), f);
-	}
+	});
 	for (auto iter : linkedShaderCache_) {
 		ShaderID vsid, fsid;
-		for (auto iter2 : vsCache_) {
-			if (iter.vs == iter2.second)
-				vsid = iter2.first;
-		}
-		for (auto iter2 : fsCache_) {
-			if (iter.fs == iter2.second)
-				fsid = iter2.first;
-		}
+		vsCache_.Iterate([&](const ShaderID &id, Shader *shader) {
+			if (iter.vs == shader)
+				vsid = id;
+		});
+		fsCache_.Iterate([&](const ShaderID &id, Shader *shader) {
+			if (iter.fs == shader)
+				fsid = id;
+		});
 		fwrite(&vsid, 1, sizeof(vsid), f);
 		fwrite(&fsid, 1, sizeof(fsid), f);
 	}

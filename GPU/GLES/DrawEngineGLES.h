@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <Common/Hashmaps.h>
 #include <unordered_map>
 
 #include "GPU/GPUState.h"
@@ -27,7 +28,6 @@
 #include "GPU/Common/GPUStateUtils.h"
 #include "GPU/GLES/FragmentShaderGeneratorGLES.h"
 #include "gfx/gl_common.h"
-#include "gfx/gl_lost_manager.h"
 
 class LinkedShader;
 class ShaderManagerGLES;
@@ -71,7 +71,7 @@ public:
 		flags = 0;
 	}
 
-	enum Status {
+	enum Status : uint8_t {
 		VAI_NEW,
 		VAI_HASHING,
 		VAI_RELIABLE,  // cache, don't hash
@@ -81,8 +81,6 @@ public:
 	ReliableHashType hash;
 	u32 minihash;
 
-	Status status;
-
 	u32 vbo;
 	u32 ebo;
 
@@ -90,6 +88,7 @@ public:
 	u16 numVerts;
 	u16 maxIndex;
 	s8 prim;
+	Status status;
 
 	// ID information
 	int numDraws;
@@ -100,7 +99,7 @@ public:
 };
 
 // Handles transform, lighting and drawing.
-class DrawEngineGLES : public DrawEngineCommon, public GfxResourceHolder {
+class DrawEngineGLES : public DrawEngineCommon {
 public:
 	DrawEngineGLES();
 	virtual ~DrawEngineGLES();
@@ -120,10 +119,9 @@ public:
 		fragmentTestCache_ = testCache;
 	}
 	void RestoreVAO();
-	void InitDeviceObjects();
-	void DestroyDeviceObjects();
-	void GLLost() override;
-	void GLRestore() override;
+
+	void DeviceLost();
+	void DeviceRestore();
 
 	void ClearTrackedVertexArrays() override;
 	void DecimateTrackedVertexArrays();
@@ -138,7 +136,7 @@ public:
 	void FinishDeferred() {
 		if (!numDrawCalls)
 			return;
-		DecodeVerts();
+		DecodeVerts(decoded);
 	}
 
 	bool IsCodePtrVertexDecoder(const u8 *ptr) const;
@@ -154,7 +152,9 @@ public:
 	void DecimateBuffers();
 
 private:
-	void DecodeVerts();
+	void InitDeviceObjects();
+	void DestroyDeviceObjects();
+
 	void DoFlush();
 	void ApplyDrawState(int prim);
 	void ApplyDrawStateLate();
@@ -166,7 +166,7 @@ private:
 
 	void MarkUnreliable(VertexArrayInfo *vai);
 
-	std::unordered_map<u32, VertexArrayInfo *> vai_;
+	PrehashMap<VertexArrayInfo *, nullptr> vai_;
 
 	// Vertex buffer objects
 	// Element buffer objects

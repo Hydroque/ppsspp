@@ -295,13 +295,13 @@ public:
 			// On load state, we re-examine in case our syscall ids changed.
 			if (libstub != 0) {
 				importedFuncs.clear();
-				if (!KernelImportModuleFuncs(this, nullptr, true)) {
-					ERROR_LOG(LOADER, "Something went wrong loading imports on load state");
-				}
+				// Imports reloaded in KernelModuleDoState.
 			} else {
 				// Older save state.  Let's still reload, but this may not pick up new flags, etc.
 				bool foundBroken = false;
-				for (auto func : importedFuncs) {
+				auto importedFuncsState = importedFuncs;
+				importedFuncs.clear();
+				for (auto func : importedFuncsState) {
 					if (func.moduleName[KERNELOBJECT_MAX_NAME_LENGTH] != '\0' || !Memory::IsValidAddress(func.stubAddr)) {
 						foundBroken = true;
 					} else {
@@ -497,6 +497,19 @@ void __KernelModuleDoState(PointerWrap &p)
 		p.Do(loadedModules);
 	}
 
+	if (p.mode == p.MODE_READ) {
+		u32 error;
+		// We process these late, since they depend on loadedModules for interlinking.
+		for (SceUID moduleId : loadedModules) {
+			Module *module = kernelObjects.Get<Module>(moduleId, error);
+			if (module && module->libstub != 0) {
+				if (!KernelImportModuleFuncs(module, nullptr, true)) {
+					ERROR_LOG(LOADER, "Something went wrong loading imports on load state");
+				}
+			}
+		}
+	}
+
 	if (g_Config.bFuncReplacements) {
 		MIPSAnalyst::ReplaceFunctions();
 	}
@@ -635,8 +648,8 @@ void ImportVarSymbol(const VarSymbolImport &var) {
 	}
 
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module || !module->ImportsOrExportsModuleName(var.moduleName)) {
 			continue;
 		}
@@ -656,8 +669,8 @@ void ImportVarSymbol(const VarSymbolImport &var) {
 
 void ExportVarSymbol(const VarSymbolExport &var) {
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module || !module->ImportsOrExportsModuleName(var.moduleName)) {
 			continue;
 		}
@@ -674,8 +687,8 @@ void ExportVarSymbol(const VarSymbolExport &var) {
 
 void UnexportVarSymbol(const VarSymbolExport &var) {
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module || !module->ImportsOrExportsModuleName(var.moduleName)) {
 			continue;
 		}
@@ -703,8 +716,8 @@ void ImportFuncSymbol(const FuncSymbolImport &func, bool reimporting) {
 	}
 
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module || !module->ImportsOrExportsModuleName(func.moduleName)) {
 			continue;
 		}
@@ -743,8 +756,8 @@ void ExportFuncSymbol(const FuncSymbolExport &func) {
 	}
 
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module || !module->ImportsOrExportsModuleName(func.moduleName)) {
 			continue;
 		}
@@ -767,8 +780,8 @@ void UnexportFuncSymbol(const FuncSymbolExport &func) {
 	}
 
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module || !module->ImportsOrExportsModuleName(func.moduleName)) {
 			continue;
 		}
@@ -1068,9 +1081,7 @@ static Module *__KernelLoadELFFromPtr(const u8 *ptr, size_t elfSize, u32 loadAdd
 
 		if (IsHLEVersionedModule(head->modname)) {
 			int ver = (head->module_ver_hi << 8) | head->module_ver_lo;
-			char temp[256];
-			snprintf(temp, sizeof(temp), "Loading module %s with version %%04x, devkit %%08x", head->modname);
-			INFO_LOG_REPORT(SCEMODULE, temp, ver, head->devkitversion);
+			INFO_LOG(SCEMODULE, "Loading module %s with version %04x, devkit %08x", head->modname, ver, head->devkitversion);
 			reportedModule = true;
 
 			if (!strcmp(head->modname, "sceMpeg_library")) {
@@ -1146,7 +1157,7 @@ static Module *__KernelLoadELFFromPtr(const u8 *ptr, size_t elfSize, u32 loadAdd
 
 	// DO NOT change to else if, see above.
 	if (*magicPtr != 0x464c457f) {
-		ERROR_LOG_REPORT(SCEMODULE, "Wrong magic number %08x", *magicPtr);
+		ERROR_LOG(SCEMODULE, "Wrong magic number %08x", *magicPtr);
 		*error_string = "File corrupt";
 		if (newptr)
 			delete [] newptr;
@@ -1432,9 +1443,7 @@ static Module *__KernelLoadELFFromPtr(const u8 *ptr, size_t elfSize, u32 loadAdd
 		delete [] newptr;
 
 	if (!reportedModule && IsHLEVersionedModule(modinfo->name)) {
-		char temp[256];
-		snprintf(temp, sizeof(temp), "Loading module %s with version %%04x, devkit %%08x", modinfo->name);
-		INFO_LOG_REPORT(SCEMODULE, temp, modinfo->moduleVersion, devkitVersion);
+		INFO_LOG(SCEMODULE, "Loading module %s with version %04x, devkit %08x", modinfo->name, modinfo->moduleVersion, devkitVersion);
 
 		if (!strcmp(modinfo->name, "sceMpeg_library")) {
 			__MpegLoadModule(modinfo->moduleVersion);
@@ -1810,7 +1819,7 @@ u32 sceKernelLoadModule(const char *name, u32 flags, u32 optionAddr) {
 	u32 magic;
 	u32 error;
 	std::string error_string;
-	module = __KernelLoadELFFromPtr(temp, (size_t)size, 0, lmoption ? lmoption->position == 1 : false, &error_string, &magic, error);
+	module = __KernelLoadELFFromPtr(temp, (size_t)size, 0, lmoption ? lmoption->position == PSP_SMEM_High : false, &error_string, &magic, error);
 	delete [] temp;
 	pspFileSystem.CloseFile(handle);
 
@@ -2256,7 +2265,7 @@ static u32 sceKernelLoadModuleByID(u32 id, u32 flags, u32 lmoptionPtr)
 	u8 *temp = new u8[size - pos];
 	pspFileSystem.ReadFile(handle, temp, size - pos);
 	u32 magic;
-	module = __KernelLoadELFFromPtr(temp, size - pos, 0, lmoption ? lmoption->position == 1 : false, &error_string, &magic, error);
+	module = __KernelLoadELFFromPtr(temp, size - pos, 0, lmoption ? lmoption->position == PSP_SMEM_High : false, &error_string, &magic, error);
 	delete [] temp;
 
 	if (!module) {
@@ -2313,7 +2322,7 @@ static SceUID sceKernelLoadModuleBufferUsbWlan(u32 size, u32 bufPtr, u32 flags, 
 	Module *module = 0;
 	u32 magic;
 	u32 error;
-	module = __KernelLoadELFFromPtr(Memory::GetPointer(bufPtr), size, 0, lmoption ? lmoption->position == 1 : false, &error_string, &magic, error);
+	module = __KernelLoadELFFromPtr(Memory::GetPointer(bufPtr), size, 0, lmoption ? lmoption->position == PSP_SMEM_High : false, &error_string, &magic, error);
 
 	if (!module) {
 		// Some games try to load strange stuff as PARAM.SFO as modules and expect it to fail.
@@ -2392,8 +2401,8 @@ static u32 sceKernelGetModuleIdList(u32 resultBuffer, u32 resultBufferSize, u32 
 	u32 resultBufferOffset = 0;
 
 	u32 error;
-	for (auto mod = loadedModules.begin(), modend = loadedModules.end(); mod != modend; ++mod) {		
-		Module *module = kernelObjects.Get<Module>(*mod, error);
+	for (SceUID moduleId : loadedModules) {
+		Module *module = kernelObjects.Get<Module>(moduleId, error);
 		if (!module->isFake) {
 			if (resultBufferOffset < resultBufferSize) {
 				Memory::Write_U32(module->GetUID(), resultBuffer + resultBufferOffset);

@@ -162,6 +162,13 @@ bool UIDialogScreen::key(const KeyInput &key) {
 	return retval;
 }
 
+void UIDialogScreen::sendMessage(const char *msg, const char *value) {
+	Screen *screen = screenManager()->dialogParent(this);
+	if (screen) {
+		screen->sendMessage(msg, value);
+	}
+}
+
 bool UIScreen::axis(const AxisInput &axis) {
 	// Simple translation of hat to keys for Shield and other modern pads.
 	// TODO: Use some variant of keymap?
@@ -300,6 +307,10 @@ void PopupScreen::TriggerFinish(DialogResult result) {
 	finishResult_ = result;
 
 	OnCompleted(result);
+}
+
+void PopupScreen::resized() {
+	RecreateViews();
 }
 
 void PopupScreen::CreateViews() {
@@ -638,6 +649,7 @@ void SliderPopupScreen::CreatePopupContents(UI::ViewGroup *parent) {
 	edit_ = new TextEdit(temp, "", new LinearLayoutParams(10.0f));
 	edit_->SetMaxLen(16);
 	edit_->SetTextColor(dc.theme->popupStyle.fgColor);
+	edit_->SetTextAlign(FLAG_DYNAMIC_ASCII);
 	edit_->OnTextChange.Handle(this, &SliderPopupScreen::OnTextChange);
 	changing_ = false;
 	lin->Add(edit_);
@@ -668,6 +680,7 @@ void SliderFloatPopupScreen::CreatePopupContents(UI::ViewGroup *parent) {
 	edit_ = new TextEdit(temp, "", new LinearLayoutParams(10.0f));
 	edit_->SetMaxLen(16);
 	edit_->SetTextColor(dc.theme->popupStyle.fgColor);
+	edit_->SetTextAlign(FLAG_DYNAMIC_ASCII);
 	edit_->OnTextChange.Handle(this, &SliderFloatPopupScreen::OnTextChange);
 	changing_ = false;
 	lin->Add(edit_);
@@ -804,7 +817,7 @@ void TextEditPopupScreen::CreatePopupContents(UI::ViewGroup *parent) {
 
 void TextEditPopupScreen::OnCompleted(DialogResult result) {
 	if (result == DR_OK) {
-		*value_ = edit_->GetText();
+		*value_ = StripSpaces(edit_->GetText());
 		EventParams e{};
 		e.v = edit_;
 		OnChange.Trigger(e);

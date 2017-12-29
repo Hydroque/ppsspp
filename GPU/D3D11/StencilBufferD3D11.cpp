@@ -21,14 +21,12 @@
 
 #include "ext/native/thin3d/thin3d.h"
 #include "Core/Reporting.h"
+#include "GPU/Common/StencilCommon.h"
 #include "GPU/D3D11/FramebufferManagerD3D11.h"
 #include "GPU/D3D11/FragmentShaderGeneratorD3D11.h"
 #include "GPU/D3D11/ShaderManagerD3D11.h"
 #include "GPU/D3D11/TextureCacheD3D11.h"
 #include "GPU/D3D11/D3D11Util.h"
-
-#define STR_HELPER(x) #x
-#define STR(x) STR_HELPER(x)
 
 struct StencilValueUB {
 	uint32_t u_stencilValue[4];
@@ -70,39 +68,6 @@ VS_OUT main(VS_IN In) {
   return Out;
 }
 )";
-
-static u8 StencilBits5551(const u8 *ptr8, u32 numPixels) {
-	const u32 *ptr = (const u32 *)ptr8;
-
-	for (u32 i = 0; i < numPixels / 2; ++i) {
-		if (ptr[i] & 0x80008000) {
-			return 1;
-		}
-	}
-	return 0;
-}
-
-static u8 StencilBits4444(const u8 *ptr8, u32 numPixels) {
-	const u32 *ptr = (const u32 *)ptr8;
-	u32 bits = 0;
-
-	for (u32 i = 0; i < numPixels / 2; ++i) {
-		bits |= ptr[i];
-	}
-
-	return ((bits >> 12) & 0xF) | (bits >> 28);
-}
-
-static u8 StencilBits8888(const u8 *ptr8, u32 numPixels) {
-	const u32 *ptr = (const u32 *)ptr8;
-	u32 bits = 0;
-
-	for (u32 i = 0; i < numPixels; ++i) {
-		bits |= ptr[i];
-	}
-
-	return bits >> 24;
-}
 
 // TODO : If SV_StencilRef is available (D3D11.3) then this can be done in a single pass.
 bool FramebufferManagerD3D11::NotifyStencilUpload(u32 addr, int size, bool skipZero) {
@@ -163,6 +128,8 @@ bool FramebufferManagerD3D11::NotifyStencilUpload(u32 addr, int size, bool skipZ
 		context_->IASetVertexBuffers(0, 1, &fsQuadBuffer_, &quadStride_, &quadOffset_);
 		context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 		context_->Draw(4, 0);
+
+		gstate_c.Dirty(DIRTY_BLEND_STATE | DIRTY_RASTER_STATE | DIRTY_VIEWPORTSCISSOR_STATE);
 		return true;
 	}
 
@@ -200,6 +167,7 @@ bool FramebufferManagerD3D11::NotifyStencilUpload(u32 addr, int size, bool skipZ
 	}
 	D3D11_VIEWPORT vp{ 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
 	context_->RSSetViewports(1, &vp);
+	gstate_c.Dirty(DIRTY_VIEWPORTSCISSOR_STATE);
 
 	float coord[20] = {
 		-1.0f,  1.0f, 0.0f, 0.0f, 0.0f,
@@ -226,6 +194,7 @@ bool FramebufferManagerD3D11::NotifyStencilUpload(u32 addr, int size, bool skipZ
 	context_->IASetVertexBuffers(0, 1, &quadBuffer_, &quadStride_, &quadOffset_);
 	context_->PSSetSamplers(0, 1, &stockD3D11.samplerPoint2DClamp);
 	context_->OMSetDepthStencilState(stockD3D11.depthDisabledStencilWrite, 0xFF);
+	gstate_c.Dirty(DIRTY_BLEND_STATE | DIRTY_RASTER_STATE | DIRTY_DEPTHSTENCIL_STATE);
 
 	for (int i = 1; i < values; i += i) {
 		if (!(usedBits & i)) {

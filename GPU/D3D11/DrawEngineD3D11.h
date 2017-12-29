@@ -17,11 +17,11 @@
 
 #pragma once
 
-#include <unordered_map>
-
+#include <map>
 #include <d3d11.h>
 #include <d3d11_1.h>
 
+#include "Common/Hashmaps.h"
 #include "GPU/GPUState.h"
 #include "GPU/Common/GPUDebugInterface.h"
 #include "GPU/Common/IndexGenerator.h"
@@ -72,7 +72,7 @@ public:
 	}
 	~VertexArrayInfoD3D11();
 
-	enum Status {
+	enum Status : uint8_t {
 		VAI_NEW,
 		VAI_HASHING,
 		VAI_RELIABLE,  // cache, don't hash
@@ -82,8 +82,6 @@ public:
 	ReliableHashType hash;
 	u32 minihash;
 
-	Status status;
-
 	ID3D11Buffer *vbo;
 	ID3D11Buffer *ebo;
 
@@ -91,6 +89,7 @@ public:
 	u16 numVerts;
 	u16 maxIndex;
 	s8 prim;
+	Status status;
 
 	// ID information
 	int numDraws;
@@ -122,9 +121,6 @@ public:
 
 	void BeginFrame();
 
-	void SetupVertexDecoder(u32 vertType);
-	void SetupVertexDecoderInternal(u32 vertType);
-
 	// So that this can be inlined
 	void Flush() {
 		if (!numDrawCalls)
@@ -135,10 +131,8 @@ public:
 	void FinishDeferred() {
 		if (!numDrawCalls)
 			return;
-		DecodeVerts();
+		DecodeVerts(decoded);
 	}
-
-	bool IsCodePtrVertexDecoder(const u8 *ptr) const;
 
 	void DispatchFlush() override { Flush(); }
 	void DispatchSubmitPrim(void *verts, void *inds, GEPrimitiveType prim, int vertexCount, u32 vertType, int *bytesRead) override {
@@ -149,15 +143,14 @@ public:
 
 	void Resized() override;
 
+	void ClearInputLayoutMap();
+
 private:
-	void DecodeVerts();
 	void DoFlush();
 
 	void ApplyDrawState(int prim);
 	void ApplyDrawStateLate(bool applyStencilRef, uint8_t stencilRef);
 	void ResetShaderBlending();
-
-	void ClearInputLayoutMap();
 
 	ID3D11InputLayout *SetupDecFmtForDraw(D3D11VertexShader *vshader, const DecVtxFormat &decFmt, u32 pspFmt);
 
@@ -169,21 +162,21 @@ private:
 	ID3D11DeviceContext *context_;
 	ID3D11DeviceContext1 *context1_;
 
-	std::unordered_map<u32, VertexArrayInfoD3D11 *> vai_;
+	PrehashMap<VertexArrayInfoD3D11 *, nullptr> vai_;
 
 	struct InputLayoutKey {
 		D3D11VertexShader *vshader;
-		u32 vertType;
+		u32 decFmtId;
 		bool operator <(const InputLayoutKey &other) const {
-			if (vertType < other.vertType)
+			if (decFmtId < other.decFmtId)
 				return true;
-			if (vertType > other.vertType)
+			if (decFmtId > other.decFmtId)
 				return false;
 			return vshader < other.vshader;
 		}
 	};
 
-	std::map<InputLayoutKey, ID3D11InputLayout *> inputLayoutMap_;
+	DenseHashMap<InputLayoutKey, ID3D11InputLayout *, nullptr> inputLayoutMap_;
 
 	// Other
 	ShaderManagerD3D11 *shaderManager_ = nullptr;
@@ -194,11 +187,11 @@ private:
 	PushBufferD3D11 *pushVerts_;
 	PushBufferD3D11 *pushInds_;
 
-	// D3D11 state object caches
-	std::map<uint64_t, ID3D11BlendState *> blendCache_;
-	std::map<uint64_t, ID3D11BlendState1 *> blendCache1_;
-	std::map<uint64_t, ID3D11DepthStencilState *> depthStencilCache_;
-	std::map<uint32_t, ID3D11RasterizerState *> rasterCache_;
+	// D3D11 state object caches.
+	DenseHashMap<uint64_t, ID3D11BlendState *, nullptr> blendCache_;
+	DenseHashMap<uint64_t, ID3D11BlendState1 *, nullptr> blendCache1_;
+	DenseHashMap<uint64_t, ID3D11DepthStencilState *, nullptr> depthStencilCache_;
+	DenseHashMap<uint32_t, ID3D11RasterizerState *, nullptr> rasterCache_;
 
 	// Keep the depth state between ApplyDrawState and ApplyDrawStateLate
 	ID3D11RasterizerState *rasterState_ = nullptr;

@@ -38,11 +38,13 @@
 #include "gfx_es2/gpu_features.h"
 
 #include "thin3d/thin3d.h"
+#include "thin3d/VulkanRenderManager.h"
 #include "Core/Config.h"
 #include "Core/Loaders.h"
 #include "Core/System.h"
 #include "Common/CPUDetect.h"
 #include "Common/GraphicsContext.h"
+#include "Common/Log.h"
 #include "Common/GL/GLInterfaceBase.h"
 #include "Common/Vulkan/VulkanLoader.h"
 #include "Common/Vulkan/VulkanContext.h"
@@ -133,6 +135,9 @@ bool AndroidEGLGraphicsContext::Init(ANativeWindow *wnd, int backbufferWidth, in
 	gl->MakeCurrent();
 	CheckGLExtensions();
 	draw_ = Draw::T3DCreateGLContext();
+	SetGPUBackend(GPUBackend::OPENGL);
+	bool success = draw_->CreatePresets();  // There will always be a GLSL compiler capable of compiling these.
+	assert(success);
 	return true;
 }
 
@@ -157,6 +162,9 @@ public:
 	AndroidJavaEGLGraphicsContext() {
 		CheckGLExtensions();
 		draw_ = Draw::T3DCreateGLContext();
+		SetGPUBackend(GPUBackend::OPENGL);
+		bool success = draw_->CreatePresets();
+		assert(success);
 	}
 	~AndroidJavaEGLGraphicsContext() {
 		delete draw_;
@@ -185,6 +193,11 @@ static VulkanContext *g_Vulkan;
 class AndroidVulkanContext : public AndroidGraphicsContext {
 public:
 	AndroidVulkanContext() : draw_(nullptr) {}
+	~AndroidVulkanContext() {
+		delete g_Vulkan;
+		g_Vulkan = nullptr;
+	}
+
 	bool Init(ANativeWindow *wnd, int desiredBackbufferSizeX, int desiredBackbufferSizeY, int backbufferFormat, int androidVersion) override;
 	void Shutdown() override;
 	void SwapInterval(int interval) override;
@@ -266,27 +279,50 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL Vulkan_Dbg(VkDebugReportFlagsEXT msgFlags,
 }
 
 bool AndroidVulkanContext::Init(ANativeWindow *wnd, int desiredBackbufferSizeX, int desiredBackbufferSizeY, int backbufferFormat, int androidVersion) {
-	if (g_Vulkan) {
-		return false;
-	}
-
+	ILOG("AndroidVulkanContext::Init");
 	init_glslang();
 
 	g_LogOptions.breakOnError = true;
 	g_LogOptions.breakOnWarning = true;
 	g_LogOptions.msgBoxOnError = false;
 
-	ILOG("Creating vulkan context");
+	ILOG("Creating Vulkan context");
 	Version gitVer(PPSSPP_GIT_VERSION);
-	g_Vulkan = new VulkanContext("PPSSPP", gitVer.ToInteger(), VULKAN_FLAG_PRESENT_MAILBOX | VULKAN_FLAG_PRESENT_FIFO_RELAXED);
-	if (!g_Vulkan->GetInstance()) {
-		ELOG("Failed to create vulkan context");
+
+	if (!g_Vulkan) {
+		g_Vulkan = new VulkanContext();
+	}
+	VulkanContext::CreateInfo info{};
+	info.app_name = "PPSSPP";
+	info.app_ver = gitVer.ToInteger();
+	info.flags = VULKAN_FLAG_PRESENT_MAILBOX | VULKAN_FLAG_PRESENT_FIFO_RELAXED;
+	if (VK_SUCCESS != g_Vulkan->CreateInstance(info)) {
+		ELOG("Failed to create vulkan context: %s", g_Vulkan->InitError().c_str());
+		System_SendMessage("toast", "No Vulkan compatible device found. Using OpenGL instead.");
+		delete g_Vulkan;
+		g_Vulkan = nullptr;
 		return false;
 	}
 
-	ILOG("Creating vulkan device");
-	if (g_Vulkan->CreateDevice(0) != VK_SUCCESS) {
+	int physicalDevice = g_Vulkan->GetBestPhysicalDevice();
+	if (physicalDevice < 0) {
+		ELOG("No usable Vulkan device found.");
+		g_Vulkan->DestroyInstance();
+		delete g_Vulkan;
+		g_Vulkan = nullptr;
+		return false;
+	}
+
+	g_Vulkan->ChooseDevice(physicalDevice);
+	// Here we can enable device extensions if we like.
+
+	ILOG("Creating Vulkan device");
+	if (g_Vulkan->CreateDevice() != VK_SUCCESS) {
 		ILOG("Failed to create vulkan device: %s", g_Vulkan->InitError().c_str());
+		System_SendMessage("toast", "No Vulkan driver found. Using OpenGL instead.");
+		g_Vulkan->DestroyInstance();
+		delete g_Vulkan;
+		g_Vulkan = nullptr;
 		return false;
 	}
 	int width = desiredBackbufferSizeX;
@@ -296,43 +332,71 @@ bool AndroidVulkanContext::Init(ANativeWindow *wnd, int desiredBackbufferSizeX, 
 		height = pixel_yres;
 	}
 	ILOG("InitSurfaceAndroid: width=%d height=%d", width, height);
-	g_Vulkan->InitSurfaceAndroid(wnd, width, height);
+	g_Vulkan->InitSurface(WINDOWSYSTEM_ANDROID, (void *)wnd, nullptr, width, height);
 	if (g_validate_) {
 		int bits = VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_WARNING_BIT_EXT | VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT;
 		g_Vulkan->InitDebugMsgCallback(&Vulkan_Dbg, bits, &g_LogOptions);
 	}
-	g_Vulkan->InitObjects(true);
-	draw_ = Draw::T3DCreateVulkanContext(g_Vulkan);
-	return true;
+
+	bool success = true;
+	if (g_Vulkan->InitObjects()) {
+		draw_ = Draw::T3DCreateVulkanContext(g_Vulkan, g_Config.bGfxDebugSplitSubmit);
+		SetGPUBackend(GPUBackend::VULKAN);
+		success = draw_->CreatePresets();  // Doesn't fail, we ship the compiler.
+		assert(success);
+		draw_->HandleEvent(Draw::Event::GOT_BACKBUFFER, g_Vulkan->GetBackbufferWidth(), g_Vulkan->GetBackbufferHeight());
+
+		VulkanRenderManager *renderManager = (VulkanRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
+		success = renderManager->HasBackbuffers();
+	} else {
+		success = false;
+	}
+
+	ILOG("AndroidVulkanContext::Init completed, %s", success ? "successfully" : "but failed");
+	if (!success) {
+		g_Vulkan->DestroyObjects();
+		g_Vulkan->DestroyDevice();
+		g_Vulkan->DestroyDebugMsgCallback();
+
+		g_Vulkan->DestroyInstance();
+	}
+	return success;
 }
 
 void AndroidVulkanContext::Shutdown() {
 	ILOG("AndroidVulkanContext::Shutdown");
+	draw_->HandleEvent(Draw::Event::LOST_BACKBUFFER, g_Vulkan->GetBackbufferWidth(), g_Vulkan->GetBackbufferHeight());
+	ILOG("Calling NativeShutdownGraphics");
+	NativeShutdownGraphics();
 	delete draw_;
 	draw_ = nullptr;
-	NativeShutdownGraphics();
-
 	g_Vulkan->WaitUntilQueueIdle();
 	g_Vulkan->DestroyObjects();
-	g_Vulkan->DestroyDebugMsgCallback();
 	g_Vulkan->DestroyDevice();
+	g_Vulkan->DestroyDebugMsgCallback();
 
-	delete g_Vulkan;
-	g_Vulkan = nullptr;
+	g_Vulkan->DestroyInstance();
+
+	// We keep the g_Vulkan context around to avoid invalidating a ton of pointers around the app.
 
 	finalize_glslang();
+	ILOG("AndroidVulkanContext::Shutdown completed");
 }
 
 void AndroidVulkanContext::SwapBuffers() {
 }
 
 void AndroidVulkanContext::Resize() {
-	g_Vulkan->WaitUntilQueueIdle();
+	ILOG("AndroidVulkanContext::Resize begin (%d, %d)", g_Vulkan->GetBackbufferWidth(), g_Vulkan->GetBackbufferHeight());
+
+	draw_->HandleEvent(Draw::Event::LOST_BACKBUFFER, g_Vulkan->GetBackbufferWidth(), g_Vulkan->GetBackbufferHeight());
 	g_Vulkan->DestroyObjects();
 
 	// backbufferResize updated these values.	TODO: Notify another way?
-	g_Vulkan->ReinitSurfaceAndroid(pixel_xres, pixel_yres);
-	g_Vulkan->InitObjects(g_Vulkan);
+	g_Vulkan->ReinitSurface(pixel_xres, pixel_yres);
+	g_Vulkan->InitObjects();
+	draw_->HandleEvent(Draw::Event::GOT_BACKBUFFER, g_Vulkan->GetBackbufferWidth(), g_Vulkan->GetBackbufferHeight());
+	ILOG("AndroidVulkanContext::Resize end (%d, %d)", g_Vulkan->GetBackbufferWidth(), g_Vulkan->GetBackbufferHeight());
 }
 
 void AndroidVulkanContext::SwapInterval(int interval) {
@@ -362,9 +426,10 @@ static int deviceType;
 
 // Should only be used for display detection during startup (for config defaults etc)
 // This is the ACTUAL display size, not the hardware scaled display size.
-static int display_dpi;
 static int display_xres;
 static int display_yres;
+static int display_dpi_x;
+static int display_dpi_y;
 static int backbuffer_format;	// Android PixelFormat enum
 
 static int desiredBackbufferSizeX;
@@ -379,7 +444,8 @@ static float dp_xscale = 1.0f;
 static float dp_yscale = 1.0f;
 
 static bool renderer_inited = false;
-static bool renderer_ever_inited = false;
+static bool sustainedPerfSupported = false;
+
 // See NativeQueryConfig("androidJavaGL") to change this value.
 static bool javaGL = true;
 
@@ -470,6 +536,8 @@ bool System_GetPropertyBool(SystemProperty prop) {
 	switch (prop) {
 	case SYSPROP_SUPPORTS_PERMISSIONS:
 		return androidVersion >= 23;	// 6.0 Marshmallow introduced run time permissions.
+	case SYSPROP_SUPPORTS_SUSTAINED_PERF_MODE:
+		return sustainedPerfSupported;  // 7.0 introduced sustained performance mode as an optional feature.
 	case SYSPROP_HAS_BACK_BUTTON:
 		return true;
 	case SYSPROP_HAS_IMAGE_BROWSER:
@@ -540,11 +608,13 @@ extern "C" void Java_org_ppsspp_ppsspp_NativeApp_init
 
 	setCurrentThreadName("androidInit");
 
+	// Makes sure we get early permission grants.
+	ProcessFrameCommands(env);
+
 	ILOG("NativeApp.init() -- begin");
 	PROFILE_INIT();
 
 	renderer_inited = false;
-	renderer_ever_inited = false;
 	androidVersion = jAndroidVersion;
 	deviceType = jdeviceType;
 
@@ -677,63 +747,67 @@ extern "C" void Java_org_ppsspp_ppsspp_NativeRenderer_displayInit(JNIEnv * env, 
 
 	if (javaGL && !graphicsContext) {
 		graphicsContext = new AndroidJavaEGLGraphicsContext();
+	} else if (!graphicsContext) {
+		_assert_msg_(G3D, false, "No graphics context in displayInit?");
 	}
 
 	if (renderer_inited) {
 		ILOG("NativeApp.displayInit() restoring");
-		NativeDeviceLost();
 		NativeShutdownGraphics();
-		NativeDeviceRestore();
-		NativeInitGraphics(graphicsContext);
+		delete graphicsContext;
 
+		graphicsContext = new AndroidJavaEGLGraphicsContext();
+		NativeInitGraphics(graphicsContext);
 		ILOG("Restored.");
 	} else {
 		ILOG("NativeApp.displayInit() first time");
 		NativeInitGraphics(graphicsContext);
 		renderer_inited = true;
-		renderer_ever_inited = true;
 	}
 
 	NativeMessageReceived("recreateviews", "");
 }
 
-// JavaEGL
-extern "C" void Java_org_ppsspp_ppsspp_NativeRenderer_displayResize(JNIEnv *, jobject clazz, jint w, jint h, jint dpi, jfloat refreshRate) {
-	ILOG("NativeApp.displayResize(%i x %i, dpi=%i, refresh=%0.2f)", w, h, dpi, refreshRate);
+extern "C" void JNICALL Java_org_ppsspp_ppsspp_NativeApp_backbufferResize(JNIEnv *, jclass, jint bufw, jint bufh, jint format) {
+	ILOG("NativeApp.backbufferResize(%d x %d)", bufw, bufh);
 
-	/*
-	g_dpi = dpi;
-	g_dpi_scale = 240.0f / (float)g_dpi;
-	g_dpi_scale_real = g_dpi_scale;
+	bool new_size = pixel_xres != bufw || pixel_yres != bufh;
+	int old_w = pixel_xres;
+	int old_h = pixel_yres;
+	// pixel_*res is the backbuffer resolution.
+	pixel_xres = bufw;
+	pixel_yres = bufh;
+	backbuffer_format = format;
 
-	pixel_xres = w;
-	pixel_yres = h;
-	dp_xres = pixel_xres * g_dpi_scale;
-	dp_yres = pixel_yres * g_dpi_scale;
-	dp_xscale = (float)dp_xres / pixel_xres;
-	dp_yscale = (float)dp_yres / pixel_yres;
-	*/
-	// display_hz = refreshRate;
+	g_dpi = display_dpi_x;
+	g_dpi_scale_x = 240.0f / g_dpi;
+	g_dpi_scale_y = 240.0f / g_dpi;
+	g_dpi_scale_real_x = g_dpi_scale_x;
+	g_dpi_scale_real_y = g_dpi_scale_y;
 
-	pixel_xres = w;
-	pixel_yres = h;
-	// backbuffer_format = format;
-
-	g_dpi = (int)display_dpi;
-	g_dpi_scale = 240.0f / (float)g_dpi;
-	g_dpi_scale_real = g_dpi_scale;
-
-	dp_xres = display_xres * g_dpi_scale;
-	dp_yres = display_yres * g_dpi_scale;
+	dp_xres = display_xres * g_dpi_scale_x;
+	dp_yres = display_yres * g_dpi_scale_y;
 
 	// Touch scaling is from display pixels to dp pixels.
 	dp_xscale = (float)dp_xres / (float)display_xres;
 	dp_yscale = (float)dp_yres / (float)display_yres;
 
-	pixel_in_dps = (float)pixel_xres / dp_xres;
+	pixel_in_dps_x = (float)pixel_xres / dp_xres;
+	pixel_in_dps_y = (float)pixel_yres / dp_yres;
 
-	NativeResized();
+	ILOG("g_dpi=%f g_dpi_scale_x=%f g_dpi_scale_y=%f", g_dpi, g_dpi_scale_x, g_dpi_scale_y);
+	ILOG("dp_xscale=%f dp_yscale=%f", dp_xscale, dp_yscale);
+	ILOG("dp_xres=%d dp_yres=%d", dp_xres, dp_yres);
+	ILOG("pixel_xres=%d pixel_yres=%d", pixel_xres, pixel_yres);
+
+	if (new_size) {
+		ILOG("Size change detected (previously %d,%d) - calling NativeResized()", old_w, old_h);
+		NativeResized();
+	} else {
+		ILOG("Size didn't change.");
+	}
 }
+
 
 // JavaEGL
 extern "C" void Java_org_ppsspp_ppsspp_NativeRenderer_displayRender(JNIEnv *env, jobject obj) {
@@ -903,15 +977,20 @@ extern "C" void JNICALL Java_org_ppsspp_ppsspp_NativeApp_sendMessage(JNIEnv *env
 	if (msg == "moga") {
 		mogaVersion = prm;
 	} else if (msg == "permission_pending") {
+		ILOG("STORAGE PERMISSION: PENDING");
 		// TODO: Add support for other permissions
 		permissions[SYSTEM_PERMISSION_STORAGE] = PERMISSION_STATUS_PENDING;
 		NativePermissionStatus(SYSTEM_PERMISSION_STORAGE, PERMISSION_STATUS_PENDING);
 	} else if (msg == "permission_denied") {
+		ILOG("STORAGE PERMISSION: DENIED");
 		permissions[SYSTEM_PERMISSION_STORAGE] = PERMISSION_STATUS_DENIED;
 		NativePermissionStatus(SYSTEM_PERMISSION_STORAGE, PERMISSION_STATUS_PENDING);
 	} else if (msg == "permission_granted") {
+		ILOG("STORAGE PERMISSION: GRANTED");
 		permissions[SYSTEM_PERMISSION_STORAGE] = PERMISSION_STATUS_GRANTED;
 		NativePermissionStatus(SYSTEM_PERMISSION_STORAGE, PERMISSION_STATUS_PENDING);
+	} else if (msg == "sustained_perf_supported") {
+		sustainedPerfSupported = true;
 	}
 
 	NativeMessageReceived(msg.c_str(), prm.c_str());
@@ -976,37 +1055,9 @@ extern "C" void JNICALL Java_org_ppsspp_ppsspp_NativeApp_setDisplayParameters(JN
 	ILOG("NativeApp.setDisplayParameters(%d x %d, dpi=%d, refresh=%0.2f)", xres, yres, dpi, refreshRate);
 	display_xres = xres;
 	display_yres = yres;
-	display_dpi = dpi;
+	display_dpi_x = dpi;
+	display_dpi_y = dpi;
 	display_hz = refreshRate;
-}
-
-extern "C" void JNICALL Java_org_ppsspp_ppsspp_NativeApp_backbufferResize(JNIEnv *, jclass, jint bufw, jint bufh, jint format) {
-	ILOG("NativeApp.backbufferResize(%d x %d)", bufw, bufh);
-
-	// pixel_*res is the backbuffer resolution.
-	pixel_xres = bufw;
-	pixel_yres = bufh;
-	backbuffer_format = format;
-
-	g_dpi = (int)display_dpi;
-	g_dpi_scale = 240.0f / (float)g_dpi;
-	g_dpi_scale_real = g_dpi_scale;
-
-	dp_xres = display_xres * g_dpi_scale;
-	dp_yres = display_yres * g_dpi_scale;
-
-	// Touch scaling is from display pixels to dp pixels.
-	dp_xscale = (float)dp_xres / (float)display_xres;
-	dp_yscale = (float)dp_yres / (float)display_yres;
-
-	pixel_in_dps = (float)pixel_xres / dp_xres;
-
-	ILOG("dp_xscale=%f dp_yscale=%f", dp_xscale, dp_yscale);
-	ILOG("dp_xres=%d dp_yres=%d", dp_xres, dp_yres);
-	ILOG("pixel_xres=%d pixel_yres=%d", pixel_xres, pixel_yres);
-	ILOG("g_dpi=%d g_dpi_scale=%f", g_dpi, g_dpi_scale);
-
-	NativeResized();
 }
 
 extern "C" void JNICALL Java_org_ppsspp_ppsspp_NativeApp_computeDesiredBackbufferDimensions() {
@@ -1019,6 +1070,22 @@ extern "C" jint JNICALL Java_org_ppsspp_ppsspp_NativeApp_getDesiredBackbufferWid
 
 extern "C" jint JNICALL Java_org_ppsspp_ppsspp_NativeApp_getDesiredBackbufferHeight(JNIEnv *, jclass) {
 	return desiredBackbufferSizeY;
+}
+
+extern "C" void JNICALL Java_org_ppsspp_ppsspp_NativeApp_pushNewGpsData(JNIEnv *, jclass,
+		jfloat latitude, jfloat longitude, jfloat altitude, jfloat speed, jfloat bearing, jlong time) {
+	PushNewGpsData(latitude, longitude, altitude, speed, bearing, time);
+}
+
+extern "C" void JNICALL Java_org_ppsspp_ppsspp_NativeApp_pushCameraImage(JNIEnv *env, jclass,
+		jbyteArray image) {
+
+	if (image != NULL) {
+		jlong size = env->GetArrayLength(image);
+		jbyte* buffer = env->GetByteArrayElements(image, NULL);
+		PushCameraImage(size, (unsigned char *)buffer);
+		env->ReleaseByteArrayElements(image, buffer, JNI_ABORT);
+	}
 }
 
 // Call this under frameCommandLock.
@@ -1039,6 +1106,10 @@ static void ProcessFrameCommands(JNIEnv *env) {
 }
 
 extern "C" bool JNICALL Java_org_ppsspp_ppsspp_NativeActivity_runEGLRenderLoop(JNIEnv *env, jobject obj, jobject _surf) {
+	exitRenderLoop = false;
+	// This is up here to prevent race conditions, in case we pause during init.
+	renderLoopRunning = true;
+
 	ANativeWindow *wnd = ANativeWindow_fromSurface(env, _surf);
 
 	// Need to get the local JNI env for the graphics thread. Used later in draw_text_android.
@@ -1051,12 +1122,13 @@ extern "C" bool JNICALL Java_org_ppsspp_ppsspp_NativeActivity_runEGLRenderLoop(J
 
 	if (wnd == nullptr) {
 		ELOG("Error: Surface is null.");
+		renderLoopRunning = false;
 		return false;
 	}
 
 retry:
 
-	bool vulkan = g_Config.iGPUBackend == GPU_BACKEND_VULKAN;
+	bool vulkan = g_Config.iGPUBackend == (int)GPUBackend::VULKAN;
 
 	int tries = 0;
 	AndroidGraphicsContext *graphicsContext;
@@ -1069,29 +1141,24 @@ retry:
 	if (!graphicsContext->Init(wnd, desiredBackbufferSizeX, desiredBackbufferSizeY, backbuffer_format, androidVersion)) {
 		ELOG("Failed to initialize graphics context.");
 
-		if (vulkan && tries < 2) {
+		if (!exitRenderLoop && (vulkan && tries < 2)) {
 			ILOG("Trying again, this time with OpenGL.");
-			g_Config.iGPUBackend = GPU_BACKEND_OPENGL;
-			SetGPUBackend((GPUBackend)g_Config.iGPUBackend);  // Wait, why do we need a separate enum here?
+			g_Config.iGPUBackend = (int)GPUBackend::OPENGL;
+			SetGPUBackend((GPUBackend)g_Config.iGPUBackend);
 			tries++;
 			goto retry;
 		}
 
 		delete graphicsContext;
+		graphicsContext = nullptr;
+		renderLoopRunning = false;
 		return false;
 	}
 
-	if (!renderer_inited) {
+	if (!exitRenderLoop) {
 		NativeInitGraphics(graphicsContext);
-		if (renderer_ever_inited) {
-			NativeDeviceRestore();
-		}
 		renderer_inited = true;
-		renderer_ever_inited = true;
 	}
-
-	exitRenderLoop = false;
-	renderLoopRunning = true;
 
 	while (!exitRenderLoop) {
 		static bool hasSetThreadName = false;
@@ -1110,12 +1177,12 @@ retry:
 		ProcessFrameCommands(env);
 	}
 
-	ILOG("After render loop.");
-	g_gameInfoCache->WorkQueue()->Flush();
+	ILOG("Leaving EGL/Vulkan render loop.");
 
-	NativeDeviceLost();
+	NativeShutdownGraphics();
 	renderer_inited = false;
 
+	ILOG("Shutting down graphics context.");
 	graphicsContext->Shutdown();
 	delete graphicsContext;
 	graphicsContext = nullptr;

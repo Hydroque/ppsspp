@@ -18,15 +18,21 @@
 #include "gfx_es2/glsl_program.h"
 #include "Core/Reporting.h"
 #include "ext/native/gfx/GLStateCache.h"
+#include "GPU/Common/StencilCommon.h"
 #include "GPU/GLES/FramebufferManagerGLES.h"
 #include "GPU/GLES/ShaderManagerGLES.h"
 #include "GPU/GLES/TextureCacheGLES.h"
 
-static const char *gles_prefix =
-"#version 100\n"
-"precision highp float;\n";
-
 static const char *stencil_fs =
+"#ifdef GL_ES\n"
+"precision highp float;\n"
+"#endif\n"
+"#if __VERSION__ >= 130\n"
+"#define varying in\n"
+"#define texture2D texture\n"
+"#define gl_FragColor fragColor0\n"
+"out vec4 fragColor0;\n"
+"#endif\n"
 "varying vec2 v_texcoord0;\n"
 "uniform float u_stencilValue;\n"
 "uniform sampler2D tex;\n"
@@ -39,6 +45,13 @@ static const char *stencil_fs =
 "}\n";
 
 static const char *stencil_vs =
+"#ifdef GL_ES\n"
+"precision highp float;\n"
+"#endif\n"
+"#if __VERSION__ >= 130\n"
+"#define attribute in\n"
+"#define varying out\n"
+"#endif\n"
 "attribute vec4 a_position;\n"
 "attribute vec2 a_texcoord0;\n"
 "varying vec2 v_texcoord0;\n"
@@ -46,48 +59,6 @@ static const char *stencil_vs =
 "  v_texcoord0 = a_texcoord0;\n"
 "  gl_Position = a_position;\n"
 "}\n";
-
-std::string GLSLES100PrefixProgram(std::string code) {
-	if (gl_extensions.IsGLES) {
-		return std::string(gles_prefix) + code;
-	} else {
-		return code;
-	}
-}
-
-static u8 StencilBits5551(const u8 *ptr8, u32 numPixels) {
-	const u32 *ptr = (const u32 *)ptr8;
-
-	for (u32 i = 0; i < numPixels / 2; ++i) {
-		if (ptr[i] & 0x80008000) {
-			return 1;
-		}
-	}
-
-	return 0;
-}
-
-static u8 StencilBits4444(const u8 *ptr8, u32 numPixels) {
-	const u32 *ptr = (const u32 *)ptr8;
-	u32 bits = 0;
-
-	for (u32 i = 0; i < numPixels / 2; ++i) {
-		bits |= ptr[i];
-	}
-
-	return ((bits >> 12) & 0xF) | (bits >> 28);
-}
-
-static u8 StencilBits8888(const u8 *ptr8, u32 numPixels) {
-	const u32 *ptr = (const u32 *)ptr8;
-	u32 bits = 0;
-
-	for (u32 i = 0; i < numPixels; ++i) {
-		bits |= ptr[i];
-	}
-
-	return bits >> 24;
-}
 
 bool FramebufferManagerGLES::NotifyStencilUpload(u32 addr, int size, bool skipZero) {
 	if (!MayIntersectFramebuffer(addr)) {
@@ -145,12 +116,17 @@ bool FramebufferManagerGLES::NotifyStencilUpload(u32 addr, int size, bool skipZe
 		glClearColor(0, 0, 0, 0);
 		glClearStencil(0);
 		glClear(GL_STENCIL_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+
+		gstate_c.Dirty(DIRTY_BLEND_STATE | DIRTY_VIEWPORTSCISSOR_STATE);
 		return true;
 	}
 
 	if (!stencilUploadProgram_) {
 		std::string errorString;
-		stencilUploadProgram_ = glsl_create_source(GLSLES100PrefixProgram(stencil_vs).c_str(), GLSLES100PrefixProgram(stencil_fs).c_str(), &errorString);
+		static std::string vs_code, fs_code;
+		vs_code = ApplyGLSLPrelude(stencil_vs, GL_VERTEX_SHADER);
+		fs_code = ApplyGLSLPrelude(stencil_fs, GL_FRAGMENT_SHADER);
+		stencilUploadProgram_ = glsl_create_source(vs_code.c_str(), fs_code.c_str(), &errorString);
 		if (!stencilUploadProgram_) {
 			ERROR_LOG_REPORT(G3D, "Failed to compile stencilUploadProgram! This shouldn't happen.\n%s", errorString.c_str());
 		} else {
@@ -169,6 +145,7 @@ bool FramebufferManagerGLES::NotifyStencilUpload(u32 addr, int size, bool skipZe
 	glstate.colorMask.set(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
 	glstate.stencilTest.enable();
 	glstate.stencilOp.set(GL_REPLACE, GL_REPLACE, GL_REPLACE);
+	gstate_c.Dirty(DIRTY_BLEND_STATE | DIRTY_DEPTHSTENCIL_STATE);
 
 	bool useBlit = gstate_c.Supports(GPU_SUPPORTS_ARB_FRAMEBUFFER_BLIT | GPU_SUPPORTS_NV_FRAMEBUFFER_BLIT);
 
@@ -188,6 +165,7 @@ bool FramebufferManagerGLES::NotifyStencilUpload(u32 addr, int size, bool skipZe
 		draw_->BindFramebufferAsRenderTarget(dstBuffer->fbo, { Draw::RPAction::KEEP, Draw::RPAction::CLEAR });
 	}
 	glViewport(0, 0, w, h);
+	gstate_c.Dirty(DIRTY_VIEWPORTSCISSOR_STATE);
 
 	float u1 = 1.0f;
 	float v1 = 1.0f;

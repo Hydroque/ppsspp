@@ -170,7 +170,7 @@ namespace MIPSComp {
 	}
 
 	void Arm64Jit::ApplyPrefixD(const u8 *vregs, VectorSize sz) {
-		_assert_(js.prefixDFlag & JitState::PREFIX_KNOWN);
+		_assert_msg_(JIT, js.prefixDFlag & JitState::PREFIX_KNOWN, "Unexpected unknown prefix!");
 		if (!js.prefixD)
 			return;
 
@@ -231,7 +231,11 @@ namespace MIPSComp {
 					skips = SetScratch1ForSafeAddress(rs, offset, SCRATCH2);
 				}
 				// Pointerify
-				MOVK(SCRATCH1_64, ((uint64_t)Memory::base) >> 32, SHIFT_32);
+				if (jo.enablePointerify) {
+					MOVK(SCRATCH1_64, ((uint64_t)Memory::base) >> 32, SHIFT_32);
+				} else {
+					ADD(SCRATCH1_64, SCRATCH1_64, MEMBASEREG);
+				}
 			}
 			fp.LDR(32, INDEX_UNSIGNED, fpr.V(vt), SCRATCH1_64, 0);
 			for (auto skip : skips) {
@@ -261,7 +265,11 @@ namespace MIPSComp {
 				} else {
 					skips = SetScratch1ForSafeAddress(rs, offset, SCRATCH2);
 				}
-				MOVK(SCRATCH1_64, ((uint64_t)Memory::base) >> 32, SHIFT_32);
+				if (jo.enablePointerify) {
+					MOVK(SCRATCH1_64, ((uint64_t)Memory::base) >> 32, SHIFT_32);
+				} else {
+					ADD(SCRATCH1_64, SCRATCH1_64, MEMBASEREG);
+				}
 			}
 			fp.STR(32, INDEX_UNSIGNED, fpr.V(vt), SCRATCH1_64, 0);
 			for (auto skip : skips) {
@@ -303,7 +311,11 @@ namespace MIPSComp {
 					} else {
 						skips = SetScratch1ForSafeAddress(rs, imm, SCRATCH2);
 					}
-					MOVK(SCRATCH1_64, ((uint64_t)Memory::base) >> 32, SHIFT_32);
+					if (jo.enablePointerify) {
+						MOVK(SCRATCH1_64, ((uint64_t)Memory::base) >> 32, SHIFT_32);
+					} else {
+						ADD(SCRATCH1_64, SCRATCH1_64, MEMBASEREG);
+					}
 				}
 
 				fp.LDP(32, INDEX_SIGNED, fpr.V(vregs[0]), fpr.V(vregs[1]), SCRATCH1_64, 0);
@@ -332,7 +344,11 @@ namespace MIPSComp {
 					} else {
 						skips = SetScratch1ForSafeAddress(rs, imm, SCRATCH2);
 					}
-					MOVK(SCRATCH1_64, ((uint64_t)Memory::base) >> 32, SHIFT_32);
+					if (jo.enablePointerify) {
+						MOVK(SCRATCH1_64, ((uint64_t)Memory::base) >> 32, SHIFT_32);
+					} else {
+						ADD(SCRATCH1_64, SCRATCH1_64, MEMBASEREG);
+					}
 				}
 
 				fp.STP(32, INDEX_SIGNED, fpr.V(vregs[0]), fpr.V(vregs[1]), SCRATCH1_64, 0);
@@ -507,7 +523,7 @@ namespace MIPSComp {
 		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
-	static const float MEMORY_ALIGNED16(vavg_table[4]) = { 1.0f, 1.0f / 2.0f, 1.0f / 3.0f, 1.0f / 4.0f };
+	alignas(16) static const float vavg_table[4] = { 1.0f, 1.0f / 2.0f, 1.0f / 3.0f, 1.0f / 4.0f };
 
 	void Arm64Jit::Comp_Vhoriz(MIPSOpcode op) {
 		CONDITIONAL_DISABLE;
@@ -1301,10 +1317,8 @@ namespace MIPSComp {
 
 	void Arm64Jit::Comp_Vi2x(MIPSOpcode op) {
 		CONDITIONAL_DISABLE;
-
-		if (!cpu_info.bNEON) {
+		if (js.HasUnknownPrefix())
 			DISABLE;
-		}
 
 		int bits = ((op >> 16) & 2) == 0 ? 8 : 16; // vi2uc/vi2c (0/1), vi2us/vi2s (2/3)
 		bool unsignedOp = ((op >> 16) & 1) == 0; // vi2uc (0), vi2us (2)
@@ -1371,6 +1385,10 @@ namespace MIPSComp {
 	}
 
 	void Arm64Jit::Comp_Vx2i(MIPSOpcode op) {
+		CONDITIONAL_DISABLE;
+		if (js.HasUnknownPrefix())
+			DISABLE;
+
 		int bits = ((op >> 16) & 2) == 0 ? 8 : 16; // vuc2i/vc2i (0/1), vus2i/vs2i (2/3)
 		bool unsignedOp = ((op >> 16) & 1) == 0; // vuc2i (0), vus2i (2)
 
@@ -1770,6 +1788,9 @@ namespace MIPSComp {
 
 	void Arm64Jit::Comp_Viim(MIPSOpcode op) {
 		CONDITIONAL_DISABLE;
+		if (js.HasUnknownPrefix()) {
+			DISABLE;
+		}
 
 		u8 dreg;
 		GetVectorRegs(&dreg, V_Single, _VT);

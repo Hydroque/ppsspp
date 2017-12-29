@@ -70,6 +70,8 @@ void UIContext::PushScissor(const Bounds &bounds) {
 	Bounds clipped = TransformBounds(bounds);
 	if (scissorStack_.size())
 		clipped.Clip(scissorStack_.back());
+	else
+		clipped.Clip(bounds_);
 	scissorStack_.push_back(clipped);
 	ActivateTopScissor();
 }
@@ -90,12 +92,13 @@ Bounds UIContext::GetScissorBounds() {
 void UIContext::ActivateTopScissor() {
 	Bounds bounds;
 	if (scissorStack_.size()) {
-		float scale = pixel_in_dps;
+		float scale_x = pixel_in_dps_x;
+		float scale_y = pixel_in_dps_y;
 		bounds = scissorStack_.back();
-		int x = floorf(scale * bounds.x);
-		int y = floorf(scale * bounds.y);
-		int w = ceilf(scale * bounds.w);
-		int h = ceilf(scale * bounds.h);
+		int x = floorf(scale_x * bounds.x);
+		int y = floorf(scale_y * bounds.y);
+		int w = ceilf(scale_x * bounds.w);
+		int h = ceilf(scale_y * bounds.h);
 		draw_->SetScissorRect(x, y, w, h);
 	} else {
 		// Avoid rounding errors
@@ -171,7 +174,10 @@ void UIContext::DrawTextRect(const char *str, const Bounds &bounds, uint32_t col
 		Draw()->DrawTextRect(fontStyle_->atlasFont, str, bounds.x, bounds.y, bounds.w, bounds.h, color, align);
 	} else {
 		textDrawer_->SetFontScale(fontScaleX_, fontScaleY_);
-		textDrawer_->DrawStringRect(*Draw(), str, bounds, color, align);
+		Bounds rounded = bounds;
+		rounded.x = floorf(rounded.x);
+		rounded.y = floorf(rounded.y);
+		textDrawer_->DrawStringRect(*Draw(), str, rounded, color, align);
 		RebindTexture();
 	}
 }

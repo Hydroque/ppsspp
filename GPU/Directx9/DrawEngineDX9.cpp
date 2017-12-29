@@ -84,7 +84,7 @@ static const D3DVERTEXELEMENT9 TransformedVertexElements[] = {
 	D3DDECL_END()
 };
 
-DrawEngineDX9::DrawEngineDX9(Draw::DrawContext *draw) {
+DrawEngineDX9::DrawEngineDX9(Draw::DrawContext *draw) : vai_(256), vertexDeclMap_(64) {
 	device_ = (LPDIRECT3DDEVICE9)draw->GetNativeObject(Draw::NativeObject::DEVICE);
 	decOptions_.expandAllWeightsToFloat = true;
 	decOptions_.expand8BitNormalsToFloat = true;
@@ -115,12 +115,12 @@ DrawEngineDX9::~DrawEngineDX9() {
 	FreeMemoryPages(decoded, DECODED_VERTEX_BUFFER_SIZE);
 	FreeMemoryPages(decIndex, DECODED_INDEX_BUFFER_SIZE);
 	FreeMemoryPages(splineBuffer, SPLINE_BUFFER_SIZE);
-	for (auto decl = vertexDeclMap_.begin(); decl != vertexDeclMap_.end(); ++decl) {
-		if (decl->second) {
-			decl->second->Release();
+	vertexDeclMap_.Iterate([&](const uint32_t &key, IDirect3DVertexDeclaration9 *decl) {
+		if (decl) {
+			decl->Release();
 		}
-	}
-
+	});
+	vertexDeclMap_.Clear();
 	delete tessDataTransfer;
 }
 
@@ -155,9 +155,6 @@ static const DeclTypeInfo VComp[] = {
 	{0, "UNUSED_DEC_U16_2" },	// 	DEC_U16_2,
 	{D3DDECLTYPE_USHORT4N	,"D3DDECLTYPE_USHORT4N "}, // DEC_U16_3,
 	{D3DDECLTYPE_USHORT4N	,"D3DDECLTYPE_USHORT4N "}, // DEC_U16_4,
-	// Not supported in regular DX9 so faking, will cause graphics bugs until worked around
-	{0,"UNUSED_DEC_U8A_2"}, // DEC_U8A_2,
-	{0,"UNUSED_DEC_U16A_2" }, // DEC_U16A_2,
 };
 
 static void VertexAttribSetup(D3DVERTEXELEMENT9 * VertexElement, u8 fmt, u8 offset, u8 usage, u8 usage_index = 0) {
@@ -169,9 +166,11 @@ static void VertexAttribSetup(D3DVERTEXELEMENT9 * VertexElement, u8 fmt, u8 offs
 }
 
 IDirect3DVertexDeclaration9 *DrawEngineDX9::SetupDecFmtForDraw(VSShader *vshader, const DecVtxFormat &decFmt, u32 pspFmt) {
-	auto vertexDeclCached = vertexDeclMap_.find(pspFmt);
+	IDirect3DVertexDeclaration9 *vertexDeclCached = vertexDeclMap_.Get(pspFmt);
 
-	if (vertexDeclCached == vertexDeclMap_.end()) {
+	if (vertexDeclCached) {
+		return vertexDeclCached;
+	} else {
 		D3DVERTEXELEMENT9 VertexElements[8];
 		D3DVERTEXELEMENT9 *VertexElement = &VertexElements[0];
 
@@ -228,11 +227,8 @@ IDirect3DVertexDeclaration9 *DrawEngineDX9::SetupDecFmtForDraw(VSShader *vshader
 		}
 
 		// Add it to map
-		vertexDeclMap_[pspFmt] = pHardwareVertexDecl;
+		vertexDeclMap_.Insert(pspFmt, pHardwareVertexDecl);
 		return pHardwareVertexDecl;
-	} else {
-		// Set it from map
-		return vertexDeclCached->second;
 	}
 }
 
@@ -300,22 +296,6 @@ void DrawEngineDX9::SubmitPrim(void *verts, void *inds, GEPrimitiveType prim, in
 	}
 }
 
-void DrawEngineDX9::DecodeVerts() {
-	const UVScale origUV = gstate_c.uv;
-	for (; decodeCounter_ < numDrawCalls; decodeCounter_++) {
-		gstate_c.uv = uvScale[decodeCounter_];
-		DecodeVertsStep(decoded, decodeCounter_, decodedVerts_);
-	}
-	gstate_c.uv = origUV;
-
-	// Sanity check
-	if (indexGen.Prim() < 0) {
-		ERROR_LOG_REPORT(G3D, "DecodeVerts: Failed to deduce prim: %i", indexGen.Prim());
-		// Force to points (0)
-		indexGen.AddPrim(GE_PRIM_POINTS, 0);
-	}
-}
-
 void DrawEngineDX9::MarkUnreliable(VertexArrayInfoDX9 *vai) {
 	vai->status = VertexArrayInfoDX9::VAI_UNRELIABLE;
 	if (vai->vbo) {
@@ -329,10 +309,10 @@ void DrawEngineDX9::MarkUnreliable(VertexArrayInfoDX9 *vai) {
 }
 
 void DrawEngineDX9::ClearTrackedVertexArrays() {
-	for (auto vai = vai_.begin(); vai != vai_.end(); vai++) {
-		delete vai->second;
-	}
-	vai_.clear();
+	vai_.Iterate([&](uint32_t hash, DX9::VertexArrayInfoDX9 *vai) {
+		delete vai;
+	});
+	vai_.Clear();
 }
 
 void DrawEngineDX9::DecimateTrackedVertexArrays() {
@@ -345,21 +325,20 @@ void DrawEngineDX9::DecimateTrackedVertexArrays() {
 	const int threshold = gpuStats.numFlips - VAI_KILL_AGE;
 	const int unreliableThreshold = gpuStats.numFlips - VAI_UNRELIABLE_KILL_AGE;
 	int unreliableLeft = VAI_UNRELIABLE_KILL_MAX;
-	for (auto iter = vai_.begin(); iter != vai_.end(); ) {
+	vai_.Iterate([&](uint32_t hash, DX9::VertexArrayInfoDX9 *vai) {
 		bool kill;
-		if (iter->second->status == VertexArrayInfoDX9::VAI_UNRELIABLE) {
+		if (vai->status == VertexArrayInfoDX9::VAI_UNRELIABLE) {
 			// We limit killing unreliable so we don't rehash too often.
-			kill = iter->second->lastFrame < unreliableThreshold && --unreliableLeft >= 0;
+			kill = vai->lastFrame < unreliableThreshold && --unreliableLeft >= 0;
 		} else {
-			kill = iter->second->lastFrame < threshold;
+			kill = vai->lastFrame < threshold;
 		}
 		if (kill) {
-			delete iter->second;
-			vai_.erase(iter++);
-		} else {
-			++iter;
+			delete vai;
+			vai_.Remove(hash);
 		}
-	}
+	});
+	vai_.Maintain();
 
 	// Enable if you want to see vertex decoders in the log output. Need a better way.
 #if 0
@@ -415,14 +394,10 @@ void DrawEngineDX9::DoFlush() {
 
 		if (useCache) {
 			u32 id = dcid_ ^ gstate.getUVGenMode();  // This can have an effect on which UV decoder we need to use! And hence what the decoded data will look like. See #9263
-			auto iter = vai_.find(id);
-			VertexArrayInfoDX9 *vai;
-			if (iter != vai_.end()) {
-				// We've seen this before. Could have been a cached draw.
-				vai = iter->second;
-			} else {
+			VertexArrayInfoDX9 *vai = vai_.Get(id);
+			if (!vai) {
 				vai = new VertexArrayInfoDX9();
-				vai_[id] = vai;
+				vai_.Insert(id, vai);
 			}
 
 			switch (vai->status) {
@@ -434,7 +409,7 @@ void DrawEngineDX9::DoFlush() {
 					vai->minihash = ComputeMiniHash();
 					vai->status = VertexArrayInfoDX9::VAI_HASHING;
 					vai->drawsUntilNextFullHash = 0;
-					DecodeVerts(); // writes to indexGen
+					DecodeVerts(decoded); // writes to indexGen
 					vai->numVerts = indexGen.VertexCount();
 					vai->prim = indexGen.Prim();
 					vai->maxIndex = indexGen.MaxIndex();
@@ -460,7 +435,7 @@ void DrawEngineDX9::DoFlush() {
 						}
 						if (newMiniHash != vai->minihash || newHash != vai->hash) {
 							MarkUnreliable(vai);
-							DecodeVerts();
+							DecodeVerts(decoded);
 							goto rotateVBO;
 						}
 						if (vai->numVerts > 64) {
@@ -479,13 +454,13 @@ void DrawEngineDX9::DoFlush() {
 						u32 newMiniHash = ComputeMiniHash();
 						if (newMiniHash != vai->minihash) {
 							MarkUnreliable(vai);
-							DecodeVerts();
+							DecodeVerts(decoded);
 							goto rotateVBO;
 						}
 					}
 
 					if (vai->vbo == 0) {
-						DecodeVerts();
+						DecodeVerts(decoded);
 						vai->numVerts = indexGen.VertexCount();
 						vai->prim = indexGen.Prim();
 						vai->maxIndex = indexGen.MaxIndex();
@@ -554,14 +529,14 @@ void DrawEngineDX9::DoFlush() {
 					if (vai->lastFrame != gpuStats.numFlips) {
 						vai->numFrames++;
 					}
-					DecodeVerts();
+					DecodeVerts(decoded);
 					goto rotateVBO;
 				}
 			}
 
 			vai->lastFrame = gpuStats.numFlips;
 		} else {
-			DecodeVerts();
+			DecodeVerts(decoded);
 rotateVBO:
 			gpuStats.numUncachedVertsDrawn += indexGen.VertexCount();
 			useElements = !indexGen.SeenOnlyPurePrims();
@@ -606,7 +581,7 @@ rotateVBO:
 			}
 		}
 	} else {
-		DecodeVerts();
+		DecodeVerts(decoded);
 		bool hasColor = (lastVType_ & GE_VTYPE_COL_MASK) != GE_VTYPE_COL_NONE;
 		if (gstate.isModeThrough()) {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && (hasColor || gstate.getMaterialAmbientA() == 255);
@@ -625,16 +600,14 @@ rotateVBO:
 		bool drawIndexed = false;
 		u16 *inds = decIndex;
 		TransformedVertex *drawBuffer = NULL;
-		SoftwareTransformResult result;
-		memset(&result, 0, sizeof(result));
-
-		SoftwareTransformParams params;
-		memset(&params, 0, sizeof(params));
+		SoftwareTransformResult result{};
+		SoftwareTransformParams params{};
 		params.decoded = decoded;
 		params.transformed = transformed;
 		params.transformedExpanded = transformedExpanded;
 		params.fbman = framebufferManager_;
 		params.texCache = textureCache_;
+		params.allowClear = true;
 		params.allowSeparateAlphaClear = true;
 
 		int maxIndex = indexGen.MaxIndex();
@@ -712,10 +685,6 @@ rotateVBO:
 	gstate_c.vertBounds.maxV = 0;
 
 	host->GPUNotifyDraw();
-}
-
-bool DrawEngineDX9::IsCodePtrVertexDecoder(const u8 *ptr) const {
-	return decJitCache_->IsInSpace(ptr);
 }
 
 void DrawEngineDX9::TessellationDataTransferDX9::SendDataToShader(const float * pos, const float * tex, const float * col, int size, bool hasColor, bool hasTexCoords)

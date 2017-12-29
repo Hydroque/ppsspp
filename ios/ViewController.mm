@@ -8,6 +8,7 @@
 #import "ViewController.h"
 #import "AudioEngine.h"
 #import <GLKit/GLKit.h>
+#include <cassert>
 
 #include "base/display.h"
 #include "base/timeutil.h"
@@ -20,6 +21,7 @@
 #include "gfx_es2/gpu_features.h"
 
 #include "Core/Config.h"
+#include "Core/System.h"
 #include "Common/GraphicsContext.h"
 
 #include <sys/types.h>
@@ -38,6 +40,9 @@ public:
 	IOSDummyGraphicsContext() {
 		CheckGLExtensions();
 		draw_ = Draw::T3DCreateGLContext();
+		SetGPUBackend(GPUBackend::OPENGL);
+		bool success = draw_->CreatePresets();
+		assert(success);
 	}
 	~IOSDummyGraphicsContext() {
 		delete draw_;
@@ -74,7 +79,7 @@ static GraphicsContext *graphicsContext;
 @property (nonatomic) NSString* bundlePath;
 @property (nonatomic) NSMutableArray* touches;
 @property (nonatomic) AudioEngine* audioEngine;
-@property (nonatomic) iCadeReaderView* iCadeView;
+//@property (nonatomic) iCadeReaderView* iCadeView;
 #if __IPHONE_OS_VERSION_MAX_ALLOWED > __IPHONE_6_1
 @property (nonatomic) GCController *gameController __attribute__((weak_import));
 #endif
@@ -174,16 +179,19 @@ static GraphicsContext *graphicsContext;
 		size.width = h;
 	}
 
-	g_dpi = (IS_IPAD() ? 200 : 150) * scale;
-	g_dpi_scale = 240.0f / (float)g_dpi;
-	g_dpi_scale_real = g_dpi_scale;
+	g_dpi = (IS_IPAD() ? 200.0f : 150.0f) * scale;
+	g_dpi_scale_x = 240.0f / g_dpi;
+	g_dpi_scale_y = 240.0f / g_dpi;
+	g_dpi_scale_real_x = g_dpi_scale_x;
+	g_dpi_scale_real_y = g_dpi_scale_y;
 	pixel_xres = size.width * scale;
 	pixel_yres = size.height * scale;
 
-	dp_xres = pixel_xres * g_dpi_scale;
-	dp_yres = pixel_yres * g_dpi_scale;
+	dp_xres = pixel_xres * g_dpi_scale_x;
+	dp_yres = pixel_yres * g_dpi_scale_y;
 
-	pixel_in_dps = (float)pixel_xres / (float)dp_xres;
+	pixel_in_dps_x = (float)pixel_xres / (float)dp_xres;
+	pixel_in_dps_y = (float)pixel_yres / (float)dp_yres;
 
 	graphicsContext = new IOSDummyGraphicsContext();
 
@@ -192,10 +200,10 @@ static GraphicsContext *graphicsContext;
 	dp_xscale = (float)dp_xres / (float)pixel_xres;
 	dp_yscale = (float)dp_yres / (float)pixel_yres;
 	
-	self.iCadeView = [[iCadeReaderView alloc] init];
+	/*self.iCadeView = [[iCadeReaderView alloc] init];
 	[self.view addSubview:self.iCadeView];
 	self.iCadeView.delegate = self;
-	self.iCadeView.active = YES;
+	self.iCadeView.active = YES;*/
 	
 #if __IPHONE_OS_VERSION_MAX_ALLOWED > __IPHONE_6_1
 	if ([GCController class]) {

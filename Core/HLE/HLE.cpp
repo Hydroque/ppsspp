@@ -519,8 +519,7 @@ void CallSyscall(MIPSOpcode op)
 {
 	PROFILE_THIS_SCOPE("syscall");
 	double start = 0.0;  // need to initialize to fix the race condition where coreCollectDebugStats is enabled in the middle of this func.
-	if (coreCollectDebugStats)
-	{
+	if (coreCollectDebugStats) {
 		time_update();
 		start = time_now_d();
 	}
@@ -544,8 +543,7 @@ void CallSyscall(MIPSOpcode op)
 		ERROR_LOG_REPORT(HLE, "Unimplemented HLE function %s", info->name ? info->name : "(\?\?\?)");
 	}
 
-	if (coreCollectDebugStats)
-	{
+	if (coreCollectDebugStats) {
 		time_update();
 		u32 callno = (op >> 6) & 0xFFFFF; //20 bits
 		int funcnum = callno & 0xFFF;
@@ -637,7 +635,7 @@ size_t hleFormatLogArgs(char *message, size_t sz, const char *argmask) {
 		// TODO: Double?  Does it ever happen?
 
 		default:
-			_assert_msg_(HLE, false, "Invalid argmask character: %c", argmask[i]);
+			_dbg_assert_msg_(HLE, false, "Invalid argmask character: %c", argmask[i]);
 			APPEND_FMT(" -- invalid arg format: %c -- %08x", argmask[i], regval);
 			break;
 		}
@@ -675,7 +673,7 @@ void hleDoLogInternal(LogTypes::LOG_TYPE t, LogTypes::LOG_LEVELS level, u64 res,
 		// TODO: For now, floats are just shown as bits.
 		fmt = "%s%08x=%s(%s)%s";
 	} else {
-		_assert_msg_(HLE, false, "Invalid return format: %c", retmask);
+		_dbg_assert_msg_(HLE, false, "Invalid return format: %c", retmask);
 		fmt = "%s%08llx=%s(%s)%s";
 	}
 
